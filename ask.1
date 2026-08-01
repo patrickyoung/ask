@@ -1,0 +1,350 @@
+.TH ASK 1 "2026-08-01" "ask 0.1.0" "General Commands Manual"
+.SH NAME
+ask \- put a question through a language model
+.SH SYNOPSIS
+.B ask
+.RI [ flags ]
+.RI [ message ...]
+.br
+.B ask replay
+.RI [ flags ]
+.RI [ session ]
+.br
+.B ask system
+.br
+.B ask login
+.I openai\-codex
+.RI [ flags ]
+.br
+.B ask logout
+.I provider
+.br
+.B ask auth
+.RI [ list ]
+.br
+.B ask version
+.br
+.B ask help
+.SH DESCRIPTION
+.B ask
+sends a message to a language model and writes the answer to standard
+output. It is a filter: the answer is stdout, progress is stderr, and the
+exit status says what happened, so it composes with the rest of the shell.
+.PP
+There is no tool loop and no agent loop. The model answers, and the answer
+is the product.
+.PP
+Every run appends to an append\-only JSONL session log. The conversation
+sent to the model is a pure function of that log \(em each call is preceded
+by a
+.I request
+event recording the exact normalized request, with the conversation itself
+stored as a SHA\-256 digest rather than a second copy.
+.B ask replay \-check
+recomputes the fold and compares, which is what makes "replays exactly" a
+claim that can fail rather than a slogan.
+.PP
+Anything that is not a command is a message. A word one edit away from a
+command is refused as a probable typo rather than sent to the model;
+.B \-\-
+forces a word through as a message.
+.SH COMMANDS
+.TP
+.B ask \fR[\fIflags\fR] [\fImessage\fR...]
+Ask. Arguments are joined with spaces. Piped or redirected standard input
+becomes the message, or rides with one inside
+.I <stdin>
+delimiters when both are given. By default this continues the current
+conversation; see
+.B \-n
+and
+.BR \-f .
+.TP
+.B ask replay \fR[\fIflags\fR] [\fIsession\fR]
+Re\-render a session. The argument is a path or a bare session id; with
+none, the current session. A damaged log renders as far as it reads and
+exits 1;
+.B \-check
+refuses it outright, because what cannot be read cannot be proved.
+.TP
+.B ask system
+Print the default system prompt on stdout. The default is a value, not a
+secret, so extending it is ordinary shell rather than a config format:
+.IP
+.EX
+ask \-S "$(ask system; cat house\-style.md)" "..."
+.EE
+.TP
+.B ask login \fIopenai\-codex\fR [\fIflags\fR]
+Store subscription credentials in the auth file.
+.B \-from\-codex
+imports them from the official Codex CLI and is the usual path.
+.TP
+.B ask logout \fIprovider\fR
+Remove stored credentials for a provider.
+.TP
+.B ask auth \fR[\fIlist\fR]
+List stored credential providers and the state of each token. The auth
+file path goes to stderr, the entries to stdout.
+.TP
+.B ask version
+Print the version.
+.B \-V
+and
+.B \-\-version
+do the same.
+.TP
+.B ask help
+Print the usage summary.
+.B \-h
+and
+.B \-\-help
+do the same.
+.SH OPTIONS
+.TP
+.BI \-m " provider/model"
+Model to use, for example
+.IR anthropic/claude\-sonnet\-5 .
+Defaults to
+.BR $ASK_MODEL ,
+and when continuing a session, to the model that session was started with.
+OpenRouter models keep their own slash:
+.IR openrouter/anthropic/claude\-sonnet\-4.5 .
+.TP
+.BI \-S " text"
+System prompt, replacing the default. Defaults to
+.BR $ASK_SYSTEM .
+An explicitly empty
+.B \-S ""
+sends no system prompt at all.
+.TP
+.B \-n
+Start a new conversation instead of continuing the current one.
+.TP
+.BI \-f " file"
+Read and append to this session log, keeping a thread wherever the caller
+wants it. An existing file is continued; a new one is created. This never
+uses the conversation directory's current pointer.
+.TP
+.BI \-d " dir"
+Conversation directory. Defaults to
+.BR $ASK_DIR ,
+else
+.IR ~/.ask/sessions .
+.TP
+.BI \-effort " level"
+Reasoning effort:
+.IR off ,
+.IR low ,
+.IR medium ,
+or
+.IR high .
+The default is the provider's own, with thinking on.
+.TP
+.BI \-max\-tokens " n"
+Maximum output tokens for the answer. Default 16384. An answer cut off at
+this limit is reported on stderr and still exits 0 \(em it is output, just
+incomplete.
+.TP
+.B \-json
+Emit the raw event stream on stdout instead of the answer.
+.TP
+.B \-q
+Suppress progress on stderr, leaving only the answer.
+.TP
+.B \-check
+.RB ( replay )
+Verify the replay invariant and exit.
+.TP
+.BI \-step " n"
+.RB ( replay )
+Print the exact provider request logged at this sequence number, with the
+conversation reconstituted from the fold its digest stands for.
+.SH CONVERSATIONS
+A session is one JSONL file in the conversation directory, named by a
+sortable id. The
+.I current
+symlink names the session a bare
+.B ask
+continues, and is repointed on every run.
+.PP
+Because continuing is the default, a pipeline inherits whatever was asked
+before it. When that matters, use
+.B \-n
+or give the thread its own file with
+.BR \-f .
+Every run that continues a session announces which one it joined and how
+many turns it already holds.
+.PP
+Only one process may write to a session at a time. A second is refused,
+naming the process that holds it: two writers would interleave two
+conversations into one file, and every digest written afterwards would
+fail its fold. A lock left behind by a dead process is stolen.
+.SH ENVIRONMENT
+.TP
+.B ASK_MODEL
+Default for
+.BR \-m .
+.TP
+.B ASK_SYSTEM
+Default system prompt, overriding the built\-in one and overridden by
+.BR \-S .
+.TP
+.B ASK_DIR
+Default for
+.BR \-d .
+.TP
+.B ASK_AUTH_FILE
+Path to the stored credential file. Default
+.IR ~/.ask/auth.json ,
+created with mode 0600.
+.TP
+.B ANTHROPIC_API_KEY\fR, \fBOPENAI_API_KEY\fR, \fBGEMINI_API_KEY\fR, \fBOPENROUTER_API_KEY
+Vendor API keys. Each is required only for the provider that uses it, and
+becomes optional behind a gateway or on Vertex, where the credential lives
+in the transport.
+.TP
+.BI < PROVIDER >_BASE_URL
+Point one provider at a corporate gateway, for example
+.BR ANTHROPIC_BASE_URL .
+.TP
+.B ASK_AUTH_URL
+OAuth token endpoint for a gateway. Its presence enables bearer
+authentication on every provider.
+.B ASK_AUTH_CLIENT_ID
+and
+.B ASK_AUTH_CLIENT_SECRET
+are sent as client_secret_post form fields;
+.B ASK_AUTH_REFRESH_TOKEN
+selects the refresh_token grant instead of client_credentials; and
+.B ASK_AUTH_SCOPE
+is sent when set. Tokens are held in memory for the life of the process
+and never written to disk.
+.TP
+.B ANTHROPIC_VERTEX_PROJECT_ID
+Route
+.I anthropic/
+models through Google Vertex AI. Its presence enables Vertex, and
+.B CLOUD_ML_REGION
+is then required \(em
+.IR global ,
+.IR us ,
+.IR eu ,
+or a specific region such as
+.IR us\-east5 .
+.B ANTHROPIC_VERTEX_BASE_URL
+replaces the region\-derived endpoint.
+.B ANTHROPIC_BASE_URL
+is ignored while Vertex is enabled.
+.TP
+.B NO_COLOR
+Disable colour on stderr. Colour is used only when stderr is a terminal.
+.SH FILES
+.TP
+.I ~/.ask/sessions/
+Session logs, one JSONL file per conversation, plus the
+.I current
+symlink.
+.TP
+.I ~/.ask/auth.json
+Stored credentials, mode 0600.
+.SH EXIT STATUS
+.TP
+.B 0
+The model answered.
+.TP
+.B 1
+An error: bad usage, a missing key, a provider failure, a corrupt log, or
+a turn that produced no text.
+.TP
+.B 2
+The context window is full. This is permanent for that conversation \(em
+the same request will fail identically forever \(em so it is told apart
+from an ordinary error, and a retry loop can stop instead of grinding.
+Start a new conversation with
+.BR \-n .
+.TP
+.B 130
+Interrupted. The partial turn is logged as partial and excluded from
+context, so the session can be continued and the question asked again.
+.SH EXAMPLES
+Ask a question:
+.PP
+.EX
+ask what is a monad
+.EE
+.PP
+Use a pipe as the data and the argument as the instruction:
+.PP
+.EX
+git diff \(bv ask "write a commit message"
+.EE
+.PP
+Keep stdout clean and watch progress on the terminal:
+.PP
+.EX
+ask "explain this error" < build.log > answer.txt
+.EE
+.PP
+Continue, then branch off:
+.PP
+.EX
+ask "what is a monad"
+ask "give me an example in Go"
+ask \-n "unrelated question"
+.EE
+.PP
+Keep a thread of its own, and prove it later:
+.PP
+.EX
+ask \-f review.jsonl "review this diff" < patch
+ask \-f review.jsonl "now summarize the risks"
+ask replay \-check review.jsonl
+.EE
+.PP
+Extend the default system prompt instead of replacing it:
+.PP
+.EX
+ask \-S "$(ask system; cat house\-style.md)" "draft the release note"
+.EE
+.PP
+Branch a script on the outcome:
+.PP
+.EX
+if ask \-q "does this log show an OOM?" < kern.log; then ...; fi
+.EE
+.PP
+Prove every session on disk still replays:
+.PP
+.EX
+for f in ~/.ask/sessions/*.jsonl; do ask replay \-check "$f" || echo "$f"; done
+.EE
+.SH DIAGNOSTICS
+Progress, reasoning, retries and the closing token count all go to stderr,
+so
+.B 2>/dev/null
+leaves the answer alone. Reasoning renders dimmed when stderr is a
+terminal. When stdout and stderr are the same file or terminal, the answer
+is not printed twice.
+.SH SEE ALSO
+.BR jq (1)
+.SH HISTORY
+.B ask
+is the conversational core of
+.BR mu ,
+a file\-based agent, carved out as a filter: the provider layer, the
+credential handling and the replay invariant, without the tool loop, the
+verifier, or the workspace.
+.SH CAVEATS
+A word one edit from a command is refused rather than sent to the model.
+This is deliberate \(em a typo would otherwise be a paid model call
+appended to the live conversation \(em but it means
+.B ask verison
+must be written
+.B ask \-\- verison
+to reach the model as a message.
+.PP
+Switching providers mid\-conversation is allowed and degrades gracefully:
+each adapter replays its own opaque reasoning state and ignores another's.
+The text of the conversation always survives; the thinking behind it may
+not.
