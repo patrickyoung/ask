@@ -139,7 +139,9 @@ func (c *Chat) stream(ctx context.Context, req provider.Request) (event.Turn, er
 			wait = time.Duration(float64(time.Second) * float64(int(1)<<attempt) * (0.5 + rand.Float64()))
 			wait = min(wait, time.Minute)
 		}
-		c.append(event.Retry, event.RetryData{Attempt: attempt, Status: pe.Status, WaitMS: wait.Milliseconds()})
+		c.append(event.Retry, event.RetryData{
+			Attempt: attempt, Status: pe.Status, WaitMS: wait.Milliseconds(), Error: pe.Msg,
+		})
 		select {
 		case <-time.After(wait):
 		case <-ctx.Done():

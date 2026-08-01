@@ -168,6 +168,11 @@ func TestRetryIsLoggedThenSucceeds(t *testing.T) {
 			if d.Status != 429 || d.WaitMS <= 0 {
 				t.Errorf("retry event = %+v", d)
 			}
+			// A retry that does not say why leaves the log unable to
+			// explain a run that stalled for minutes.
+			if !strings.Contains(d.Error, "slow down") {
+				t.Errorf("retry event lost the provider's reason: %+v", d)
+			}
 		}
 	}
 	if retries != 1 {

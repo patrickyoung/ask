@@ -89,8 +89,15 @@ type DoneData struct {
 	Error  string `json:"error,omitempty"`
 }
 
+// RetryData records a provider failure that was worth waiting out. Status
+// 0 means the request never reached an HTTP response — a reset, a DNS
+// failure, a dropped connection — and for those the status alone says
+// nothing, so the error travels with it. Without that, a run that stalled
+// for minutes reports six identical zeroes and the log cannot answer the
+// only question being asked of it.
 type RetryData struct {
-	Attempt int   `json:"attempt"`
-	Status  int   `json:"status"`
-	WaitMS  int64 `json:"wait_ms"`
+	Attempt int    `json:"attempt"`
+	Status  int    `json:"status"`
+	WaitMS  int64  `json:"wait_ms"`
+	Error   string `json:"error,omitempty"`
 }

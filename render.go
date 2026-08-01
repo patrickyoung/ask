@@ -74,7 +74,13 @@ func (r *renderer) event(e event.Event) {
 		}
 	case event.Retry:
 		d, _ := event.As[event.RetryData](e)
-		r.line(r.dim(fmt.Sprintf("ask: retry %d in %.0fs (http %d)", d.Attempt, float64(d.WaitMS)/1000, d.Status)))
+		// Status 0 means the request never reached a response, and "http 0"
+		// tells nobody anything — name the failure instead.
+		why := fmt.Sprintf("http %d", d.Status)
+		if d.Status == 0 {
+			why = firstLine(d.Error, 60)
+		}
+		r.line(r.dim(fmt.Sprintf("ask: retry %d in %.0fs (%s)", d.Attempt, float64(d.WaitMS)/1000, why)))
 	case event.Done:
 		d, _ := event.As[event.DoneData](e)
 		// Cost only when the provider actually reported one: an omitted
