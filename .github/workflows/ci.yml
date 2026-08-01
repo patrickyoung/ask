@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # ask is a Unix filter and depends on it: O_NONBLOCK to refuse a fifo
+  # without blocking on it, kill(pid, 0) to tell a stale session lock from a
+  # live one. Both platforms it claims to run on are tested on every push.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./...
+
+      # The log is append-only and single-writer, and the streams are
+      # consumed while they are written. Those are the two places a data
+      # race would be invisible in ordinary runs and corrupting in real
+      # ones, so the race detector is not optional here.
+      - name: test -race
+        run: go test -race ./...
+
+      - name: build
+        run: go build ./...
+
+  # The docs tests already prove the man page and help agree with the code.
+  # This proves the thing they cannot: that the module is installable the
+  # way the README says it is.
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go install .
+      - run: ask version

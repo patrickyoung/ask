@@ -21,7 +21,6 @@ var accepts = map[string][]string{
 	"openai":       {"image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf"},
 	"openai-codex": {"image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf"},
 	"gemini":       {"image/", "audio/", "video/", "application/pdf"},
-	"google":       {"image/", "audio/", "video/", "application/pdf"},
 	"openrouter":   {"image/", "application/pdf", "audio/wav", "audio/mpeg"},
 }
 

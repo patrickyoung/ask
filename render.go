@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"ask/internal/event"
-	"ask/internal/provider"
+	"github.com/patrickyoung/ask/internal/event"
+	"github.com/patrickyoung/ask/internal/provider"
 )
 
 // renderer turns the event stream into terminal progress on stderr. It is

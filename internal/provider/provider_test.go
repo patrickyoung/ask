@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -529,6 +530,28 @@ func TestUnknownProviderNamesTheRealOnes(t *testing.T) {
 	for _, p := range Providers {
 		if !strings.Contains(err.Error(), p) {
 			t.Errorf("error %q does not name provider %q", err, p)
+		}
+	}
+}
+
+// TestProviderNamesAgree: Providers is the one list of names, and every
+// table keyed by a provider has to be keyed by exactly it. A name New
+// accepts but the attachment table has never heard of refuses every
+// attachment with "unknown provider"; a name in the table that New rejects
+// is a second, undocumented spelling — and two names for one thing is how
+// documentation starts being false.
+func TestProviderNamesAgree(t *testing.T) {
+	for _, name := range Providers {
+		if _, ok := accepts[name]; !ok {
+			t.Errorf("provider %q has no attachment policy", name)
+		}
+		if _, _, err := New(name + "/m"); err != nil && strings.Contains(err.Error(), "unknown provider") {
+			t.Errorf("Providers lists %q but New does not know it", name)
+		}
+	}
+	for name := range accepts {
+		if !slices.Contains(Providers, name) {
+			t.Errorf("attachment policy for %q, which is not in Providers", name)
 		}
 	}
 }

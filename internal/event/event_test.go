@@ -1,13 +1,17 @@
 package event
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"ask/internal/provider"
+	"github.com/patrickyoung/ask/internal/provider"
 )
 
 func user(text string) Event {
@@ -212,22 +216,81 @@ func TestLockRefusesConcurrentWriters(t *testing.T) {
 	}
 }
 
-// TestStaleLockIsStolen: a lock left behind by a dead process must not
-// strand the session forever.
-func TestStaleLockIsStolen(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "s.jsonl")
-	if err := os.WriteFile(path, nil, 0o644); err != nil {
-		t.Fatal(err)
+// TestKilledWriterStrandsNothing: the lock is held by the kernel on behalf
+// of an open file description, so a writer that dies without cleaning up —
+// SIGKILL, a panic, a pulled power cord — releases it on the way out. The
+// pid file this replaced could not do that honestly: it had to guess
+// liveness from a recorded pid, and a recycled pid made the session look
+// busy forever with no documented way out. The child here is killed as
+// violently as the operating system allows.
+func TestKilledWriterStrandsNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	if os.Getenv("ASK_LOCK_CHILD") == "1" {
+		log, err := CreateFile(os.Getenv("ASK_LOCK_PATH"))
+		if err != nil {
+			os.Exit(3)
+		}
+		log.Append(User, UserData{Text: "hello"})
+		fmt.Println("held")
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
 	}
-	if err := os.WriteFile(path+".lock", []byte("2147483casual\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	log, _, err := Open(path)
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestKilledWriterStrandsNothing", "-test.timeout=60s")
+	cmd.Env = append(os.Environ(), "ASK_LOCK_CHILD=1", "ASK_LOCK_PATH="+path)
+	out, err := cmd.StdoutPipe()
 	if err != nil {
-		t.Fatalf("stale lock not stolen: %v", err)
+		t.Fatal(err)
 	}
-	log.Close()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+
+	held := make(chan string, 4)
+	go func() {
+		sc := bufio.NewScanner(out)
+		for sc.Scan() {
+			if strings.TrimSpace(sc.Text()) == "held" {
+				held <- "held"
+				return
+			}
+		}
+		close(held)
+	}()
+	select {
+	case _, ok := <-held:
+		if !ok {
+			t.Fatal("child never took the lock")
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("timed out waiting for the child to take the lock")
+	}
+
+	// While it lives, the session is genuinely refused.
+	if log, _, err := Open(path); err == nil {
+		log.Close()
+		t.Fatal("a second writer was allowed onto a session another process holds")
+	} else if !strings.Contains(err.Error(), "in use") {
+		t.Errorf("error = %v, want it to say the session is in use", err)
+	}
+
+	if err := cmd.Process.Kill(); err != nil { // SIGKILL: no cleanup runs
+		t.Fatal(err)
+	}
+	cmd.Wait()
+
+	log, events, err := Open(path)
+	if err != nil {
+		t.Fatalf("a killed writer stranded the session: %v", err)
+	}
+	defer log.Close()
+	if len(events) != 1 || events[0].Type != User {
+		t.Errorf("read %d events from the dead writer's session, want its 1 user event", len(events))
+	}
+	if _, err := os.Stat(path + ".lock"); err == nil {
+		t.Error("a lock file was left behind; the kernel holds the lock, not the filesystem")
+	}
 }
 
 // TestCreateFileRefusesOverwrite: `ask -f` must append to a thread or

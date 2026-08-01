@@ -22,9 +22,23 @@ When changing `ask`:
   provider;
 - keep the log append-only and single-writer. The lock is not politeness:
   two writers interleave two conversations and break every digest written
-  afterwards;
+  afterwards. It is an `flock` on the session file, taken before the file
+  is read — a fold over a prefix that was stale when it was read writes a
+  digest the file will not reproduce, which is the same divergence from the
+  other side. Do not reintroduce a pid file: judging one stale is three
+  steps that are not one operation, and pids are recycled;
 - fail before creating a session file. A bad invocation must leave no
   litter;
+- never truncate input silently. Too much on stdin, too large an
+  attachment, too many of them: each is an error naming the limit. An
+  answer about the first part of a file, presented as an answer about the
+  file, is not something the next program in the pipe can detect;
+- credentials do not travel. A token endpoint is https except on loopback
+  (`auth.CheckTokenURL`, checked where it is configured *and* where it is
+  used), and it is fetched with `tokenClient` — bounded in time, and no
+  redirects, because the form body carries a secret that Go would re-send
+  on a 307. A rotating refresh token is spent under the credential file's
+  lock, once;
 - run `go test ./...` — and `go test -race ./...` when touching the log or
   a stream — before reporting success;
 - keep the docs true: a new flag belongs in `ask help` and `ask.1`; a new

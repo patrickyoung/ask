@@ -29,10 +29,16 @@ ok: 20260801-142233-a3f9c1e0.jsonl replays exactly (11 events)
 ## Install
 
 ```
-go install ./...          # or: go build -o ask . && mv ask ~/bin
+go install github.com/patrickyoung/ask@latest
 export ASK_MODEL=anthropic/claude-sonnet-5
 export ANTHROPIC_API_KEY=...
 ```
+
+Go 1.26 or newer, and a Unix: Linux, macOS, or BSD. `ask` opens attachments
+non-blocking so a fifo is refused rather than waited on, and locks a session
+with `flock(2)` so a crashed writer strands nothing — neither has a Windows
+spelling, and pretending otherwise would be a worse answer than saying so.
+WSL works.
 
 Five providers, one flag: `anthropic`, `openai`, `openai-codex`, `gemini`,
 `openrouter`. Models are `provider/model`, and OpenRouter models keep their
@@ -82,7 +88,10 @@ never be sent must not become an event that every later fold rebuilds.
 The bytes live in the log. A photo makes a large record; in exchange the
 session stays one self-contained file that still replays exactly, and
 copying it copies everything it means. Limits are fixed at 16 attachments,
-16 MB each, 32 MB per message. Session files are mode 0600.
+16 MB each, 32 MB per message. Piped input is bounded by the same 16 MB, and
+crossing it is an error rather than a truncation — an answer about the first
+part of a file, presented as an answer about the file, is not something the
+next program in the pipe can detect. Session files are mode 0600.
 
 Three things this makes possible, all run against PDFs with known contents:
 
@@ -167,8 +176,10 @@ $ ask replay -check review.jsonl
 
 Sessions live in `~/.ask/sessions/` (or `$ASK_DIR`), with a `current`
 symlink naming the one a bare `ask` continues. One writer at a time: a
-second is refused by name, because two processes appending to one log would
-interleave two conversations and break every digest written afterwards.
+second is refused, because two processes appending to one log would
+interleave two conversations and break every digest written afterwards. The
+lock is an `flock(2)` on the session file, so a writer that dies releases it
+on the way out — there is no lock file to find, and no session to unstick.
 
 ## The system prompt
 
@@ -264,6 +275,24 @@ it. Tokens live in memory for the life of the process, are refreshed with
 a margin, and are never written to disk. The transport never retries: `ask`
 owns retries, and they have to be visible in the log.
 
+Token endpoints must be `https`, except on loopback. They are bounded in
+time, and they never follow a redirect. All three protect the same thing:
+the form body carries a client secret or a refresh token — the long-lived
+half — so http would put it on the wire in the clear, and Go would re-send
+it to whatever host a 307 named. A gateway inside a corporate network is
+still reached across a network.
+
+```
+ask: ASK_AUTH_URL: token endpoint http://idp.corp/oauth/token is http: a
+client secret or refresh token would travel in the clear. Use https (http
+is allowed only on loopback)
+```
+
+That is refused when the endpoint is configured, not when a token first
+expires. The same rule covers `ask login -token-url` and a `token_url`
+already sitting in the credential file. [SECURITY.md](SECURITY.md) has the
+rest of what `ask` holds and where.
+
 Anthropic on Google Vertex AI follows Claude Code's environment
 conventions, so a machine configured for one works for the other:
 
@@ -314,10 +343,11 @@ model call appended to your live conversation — and `--` forces one
 through: `ask -- replay`.
 
 Full reference in `ask.1`. Tests enforce that it stays true: every verb
-appears in the man page synopsis, in `ask help`, and here; every flag and
-environment variable is documented; the man page is lint-clean and pure
-ASCII; help fits eighty columns; and requested help goes to stdout while
-misuse goes to stderr.
+appears in the man page synopsis, in `ask help`, and here; every flag,
+environment variable and provider is documented; the man page carries the
+same version the binary reports; the man page is lint-clean and pure ASCII;
+help fits eighty columns; and requested help goes to stdout while misuse
+goes to stderr.
 
 ## What it deliberately is not
 
@@ -329,11 +359,39 @@ skills, no config file, no REPL, no daemon, no MCP.
 The pieces that came across are the ones that were hard to get right: the
 provider adapters and their reasoning round-trips, the stream contract
 every adapter is held to, gateway and subscription auth, and the replay
-invariant. That is about 1,900 lines and most of the value. The CLI, the
-log and the conversation loop are the other 1,600 — 3,500 in total, against
-mu's 9,500.
+invariant. That is about 1,950 lines and most of the value. The CLI, the
+log, the conversation loop and auth are the other 2,175 — 4,125 in total,
+against mu's 9,500, and 3,900 lines of tests holding it there.
 
 The turn loop itself is under sixty lines, and that is the point.
 
 A REPL was the closest call, and the answer was no: the shell already is
 one, and `ask` remembers between invocations.
+
+## Contributing
+
+Read [AGENTS.md](AGENTS.md) first — it is short, and it is the whole set of
+rules a change is held to. The two that matter most: the Unix contract
+(stdout is the answer alone, exit 2 means the context window and nothing
+else) and the replay invariant (`event.Check` is never relaxed, only
+migrated). New provider adapters earn their keep by passing `checkContract`
+against a wire fixture.
+
+```
+go test ./...          # and -race when touching the log or a stream
+```
+
+`go test` also proves the documentation: every command appears in the man
+page, in `ask help`, and here; every flag and environment variable is
+documented; help fits eighty columns and goes to stdout while misuse goes to
+stderr. A change that outruns its docs fails.
+
+The list of things left out on purpose is at the end of AGENTS.md. It is a
+feature, and adding one of them back is a conversation before it is a patch.
+
+Security issues go through [SECURITY.md](SECURITY.md), not the issue
+tracker.
+
+## License
+
+[MIT](LICENSE).

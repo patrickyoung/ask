@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/patrickyoung/ask/internal/auth"
 )
 
 // Corporate gateways (Kong and kin) front provider APIs behind OAuth: a
@@ -44,6 +46,27 @@ type tokenSource struct {
 // now is a test seam.
 var now = time.Now
 
+// tokenClient fetches from token endpoints. It is not the default client,
+// for two reasons that both matter more than they look.
+//
+// It does not follow redirects. The form these requests carry holds a
+// client secret or a refresh token, and Go re-sends the body on a 307 or a
+// 308 — so a token endpoint that is misconfigured, or has been made to
+// redirect, would hand ask's credentials to another host. Stripping the
+// Authorization header, which the standard library does do, is no help when
+// the secret is in the body. A redirect is returned as the response it is
+// and fails loudly.
+//
+// It has a deadline. Everything else ask does is a stream a human is
+// watching, and bounding those is the caller's job (see the guide); a token
+// fetch is a short machine exchange nobody is watching, and an IdP that
+// accepts the connection and then says nothing would otherwise hang the run
+// forever with no output to explain it.
+var tokenClient = &http.Client{
+	Timeout:       30 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
 func (s *tokenSource) get() (string, error) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
@@ -66,7 +89,7 @@ func (s *tokenSource) get() (string, error) {
 	if s.scope != "" {
 		form.Set("scope", s.scope)
 	}
-	resp, err := http.PostForm(s.url, form)
+	resp, err := tokenClient.PostForm(s.url, form)
 	if err != nil {
 		return "", fmt.Errorf("oauth token: %w", err)
 	}
@@ -126,11 +149,17 @@ func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // oauthClient returns the authenticating client shared by every adapter,
-// or nil when ASK_AUTH_URL is not set.
-func oauthClient() *http.Client {
+// or nil when ASK_AUTH_URL is not set. A cleartext endpoint is refused
+// here, at configuration time, rather than at the first token fetch: a
+// deploy script with http:// in it should fail on the run that introduces
+// it, not weeks later when a token happens to expire.
+func oauthClient() (*http.Client, error) {
 	u := os.Getenv("ASK_AUTH_URL")
 	if u == "" {
-		return nil
+		return nil, nil
+	}
+	if err := auth.CheckTokenURL(u); err != nil {
+		return nil, fmt.Errorf("ASK_AUTH_URL: %w", err)
 	}
 	return &http.Client{Transport: &authTransport{
 		src: &tokenSource{
@@ -141,7 +170,7 @@ func oauthClient() *http.Client {
 			scope:   os.Getenv("ASK_AUTH_SCOPE"),
 		},
 		next: http.DefaultTransport,
-	}}
+	}}, nil
 }
 
 func firstNonEmptyLine(b []byte) string {

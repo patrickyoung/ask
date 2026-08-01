@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"ask/internal/provider"
+	"github.com/patrickyoung/ask/internal/provider"
 )
 
 // Minimal byte sequences that the standard library's sniffer recognises.

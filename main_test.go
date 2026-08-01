@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,10 +14,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 
-	"ask/internal/event"
-	"ask/internal/provider"
+	"github.com/patrickyoung/ask/internal/auth"
+	"github.com/patrickyoung/ask/internal/event"
+	"github.com/patrickyoung/ask/internal/provider"
 )
 
 // The tests below drive run() exactly as a shell does — argv in, streams
@@ -853,6 +859,41 @@ func TestManPageLints(t *testing.T) {
 	}
 }
 
+// TestVersionIsOneNumber: the version lives in the code and the man page
+// header repeats it. Two spellings of one fact drift, and the one that
+// drifts is the one nobody runs — a man page claiming a release the binary
+// does not report is the first thing a packager notices and the last thing
+// an author does.
+func TestVersionIsOneNumber(t *testing.T) {
+	man, err := os.ReadFile("ask.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `"ask ` + version + `"`; !strings.Contains(string(man), want) {
+		t.Errorf("the ask.1 .TH line does not carry %s (version = %q)", want, version)
+	}
+}
+
+// TestProvidersAreDocumented: a provider New accepts that no document names
+// is a provider nobody can find, and one the documents name that New
+// rejects is worse. provider.Providers is the single list; both files quote
+// from it.
+func TestProvidersAreDocumented(t *testing.T) {
+	for _, doc := range []string{"ask.1", "README.md"} {
+		body, err := os.ReadFile(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// roff spells a literal hyphen \-, so compare what renders.
+		text := strings.ReplaceAll(string(body), `\-`, "-")
+		for _, p := range provider.Providers {
+			if !strings.Contains(text, p) {
+				t.Errorf("provider %q is not named in %s", p, doc)
+			}
+		}
+	}
+}
+
 // TestEnvVarsAreDocumented: an environment variable the code reads and the
 // man page does not mention is undiscoverable.
 func TestEnvVarsAreDocumented(t *testing.T) {
@@ -1009,6 +1050,192 @@ func TestUnsendableAttachmentLeavesNoSession(t *testing.T) {
 	}
 }
 
+// TestOversizedStdinIsRefusedNotTruncated. A filter that quietly drops the
+// tail of its input is worse than one that fails: the answer looks like an
+// answer to the whole file, and nothing downstream can tell that it is not.
+// The bound is the same one attachments get, and crossing it is an error
+// with an empty stdout, before any session exists.
+func TestOversizedStdinIsRefusedNotTruncated(t *testing.T) {
+	dir, calls, _ := fake(t, 200, answerWire)
+	code, stdout, stderr := exec(t, strings.Repeat("a", maxAttachment+1), "summarize")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1. stderr:\n%s", code, stderr)
+	}
+	if calls.Load() != 0 {
+		t.Error("sent a truncated pipe to the provider")
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "larger than") {
+		t.Errorf("stderr does not say the input was too large:\n%s", stderr)
+	}
+	if n := len(sessions(t, dir)); n != 0 {
+		t.Errorf("a refused pipe left %d session files behind", n)
+	}
+}
+
+// TestLargeStdinStillPasses guards the fix from becoming an off-by-one that
+// refuses input that fits.
+func TestLargeStdinStillPasses(t *testing.T) {
+	_, _, bodies := fake(t, 200, answerWire)
+	text := strings.Repeat("z", maxAttachment)
+	if code, _, stderr := exec(t, text, "summarize"); code != 0 {
+		t.Fatalf("exit = %d for input exactly at the limit: %s", code, stderr)
+	}
+	if body := (*bodies)[0]; !strings.Contains(body, text) {
+		t.Errorf("the pipe reached the provider short: %d bytes of body", len(body))
+	}
+}
+
+// TestSecondInterruptKills. The first ^C cancels: the stream ends, the
+// abort is logged, and the session stays continuable. The second must reach
+// the operating system. signal.NotifyContext keeps the signal captured for
+// the life of the context and swallows every one after the first, which
+// leaves a filter that cannot be stopped from the terminal it is running in
+// if anything below it fails to honor cancellation. This runs in a child
+// process, because a test that proves a SIGINT is fatal cannot survive it.
+func TestSecondInterruptKills(t *testing.T) {
+	if os.Getenv("ASK_SIGNAL_CHILD") == "1" {
+		ctx, stop := sigCtx()
+		defer stop()
+		fmt.Println("ready")
+		<-ctx.Done()
+		fmt.Println("canceled")
+		time.Sleep(30 * time.Second) // the stream that will not stop
+		return
+	}
+
+	cmd := osexec.Command(os.Args[0], "-test.run=TestSecondInterruptKills", "-test.timeout=60s")
+	cmd.Env = append(os.Environ(), "ASK_SIGNAL_CHILD=1")
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+
+	lines := make(chan string, 8)
+	go func() {
+		defer close(lines)
+		sc := bufio.NewScanner(out)
+		for sc.Scan() {
+			lines <- sc.Text()
+		}
+	}()
+	await := func(want string) {
+		t.Helper()
+		for {
+			select {
+			case line, ok := <-lines:
+				if !ok {
+					t.Fatalf("child exited before %q", want)
+				}
+				if strings.TrimSpace(line) == want {
+					return
+				}
+			case <-time.After(20 * time.Second):
+				t.Fatalf("timed out waiting for %q", want)
+			}
+		}
+	}
+
+	await("ready")
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	await("canceled") // the first one was handled, not fatal
+
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		var ee *osexec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("child exited %v, want death by signal", err)
+		}
+		st, ok := ee.Sys().(syscall.WaitStatus)
+		if !ok || !st.Signaled() || st.Signal() != syscall.SIGINT {
+			t.Fatalf("child exit status = %v, want signaled with SIGINT", ee)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the second interrupt was swallowed; the child is still running")
+	}
+}
+
+// TestLoginRefusesCleartextTokenEndpoint: refusing at login is the whole
+// point of checking here as well as at use. The operator finds out while
+// they are looking at the command that was wrong, and nothing is written —
+// a credential file that exists is a credential file someone will trust.
+func TestLoginRefusesCleartextTokenEndpoint(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "auth.json")
+	t.Setenv("ASK_AUTH_FILE", p)
+	code, stdout, stderr := exec(t, "", "login", "openai-codex",
+		"-refresh-token", "r-0", "-token-url", "http://idp.corp/oauth/token")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1. stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "in the clear") {
+		t.Errorf("stderr does not say why:\n%s", stderr)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty on refusal", stdout)
+	}
+	if _, err := os.Stat(p); err == nil {
+		t.Error("a refused login wrote a credential file anyway")
+	}
+}
+
+// TestLoginStoresAndLogsOut walks the credential commands the way a person
+// does — in, listed, out — and checks the file mode on the way past. A
+// token given in argv is visible in ps, which is why help offers "-";
+// that path is exercised here too.
+func TestLoginStoresAndLogsOut(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "auth.json")
+	t.Setenv("ASK_AUTH_FILE", p)
+
+	if code, _, stderr := exec(t, "tok-from-stdin\n", "login", "openai-codex", "-access-token", "-"); code != 0 {
+		t.Fatalf("login exit = %d: %s", code, stderr)
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("auth file mode is %04o, want 0600", perm)
+	}
+	cred, ok, err := auth.Get("openai-codex")
+	if err != nil || !ok {
+		t.Fatalf("Get = %v, %v", ok, err)
+	}
+	if cred.AccessToken != "tok-from-stdin" {
+		t.Errorf("stored access token = %q; the trailing newline should be trimmed", cred.AccessToken)
+	}
+
+	code, stdout, _ := exec(t, "", "auth")
+	if code != 0 || !strings.Contains(stdout, "openai-codex") {
+		t.Errorf("ask auth exit = %d, stdout = %q", code, stdout)
+	}
+	if strings.Contains(stdout, "tok-from-stdin") {
+		t.Error("ask auth printed the token itself; it lists providers, not secrets")
+	}
+
+	if code, _, stderr := exec(t, "", "logout", "openai-codex"); code != 0 {
+		t.Fatalf("logout exit = %d: %s", code, stderr)
+	}
+	if _, ok, _ := auth.Get("openai-codex"); ok {
+		t.Error("logout left the credential behind")
+	}
+	if _, stdout, _ := exec(t, "", "auth"); !strings.Contains(stdout, "no stored credentials") {
+		t.Errorf("after logout, ask auth says %q", stdout)
+	}
+}
+
 // TestSessionFilesArePrivate: logs now hold photographs and documents.
 func TestSessionFilesArePrivate(t *testing.T) {
 	dir, _, _ := fake(t, 200, answerWire)
@@ -1019,5 +1246,26 @@ func TestSessionFilesArePrivate(t *testing.T) {
 	}
 	if perm := fi.Mode().Perm(); perm != 0o600 {
 		t.Errorf("session file mode is %04o, want 0600", perm)
+	}
+}
+
+// TestSessionDirIsPrivate: the 0600 on the files is worth little if the
+// directory holding them is world-readable. Every directory ask makes on
+// the way to a session — ~/.ask as much as ~/.ask/sessions — is its own.
+func TestSessionDirIsPrivate(t *testing.T) {
+	fake(t, 200, answerWire)
+	dir := filepath.Join(t.TempDir(), "dot-ask", "sessions")
+	t.Setenv("ASK_DIR", dir)
+	if code, _, stderr := exec(t, "", "hi"); code != 0 {
+		t.Fatalf("exit = %d: %s", code, stderr)
+	}
+	for _, p := range []string{dir, filepath.Dir(dir)} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o700 {
+			t.Errorf("%s mode is %04o, want 0700", p, perm)
+		}
 	}
 }

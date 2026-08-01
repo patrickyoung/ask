@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -85,6 +86,38 @@ func Save(path string, s *Store) error {
 		return err
 	}
 	return nil
+}
+
+// Lock takes an exclusive lock covering a read-modify-write of the
+// credential file, and returns the release. It blocks: whoever holds it is
+// about to produce the very token the caller wants, so waiting beats
+// failing, and the kernel drops the lock if that process dies.
+//
+// It locks a file of its own rather than auth.json, because Save replaces
+// auth.json by rename. A lock held on the credential file itself would be a
+// lock on an inode nobody else will ever open again — correct-looking and
+// worthless. The lock file is created once and never removed; removing it
+// is the same race in a different costume.
+func Lock() (func(), error) {
+	p, err := Path()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(p+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("locking %s: %w", p, err)
+	}
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
 }
 
 func Get(provider string) (Credential, bool, error) {

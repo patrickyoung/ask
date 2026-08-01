@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -25,7 +24,6 @@ type Log struct {
 	mu   sync.Mutex
 	f    *os.File
 	path string
-	lock string
 	seq  int
 	obs  func(Event)
 }
@@ -39,50 +37,80 @@ func Create(dir string) (*Log, error) {
 // keep a thread where the caller wants it. O_EXCL means an existing file is
 // never silently overwritten: a conversation is appended to or refused.
 func CreateFile(path string) (*Log, error) {
+	// 0700, matching the 0600 on the files: a session log holds every
+	// question, every answer, and the bytes of every attachment verbatim.
+	// The directory should not be more readable than what is in it.
 	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, err
 		}
 	}
-	lock, err := acquire(path)
-	if err != nil {
-		return nil, err
-	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		os.Remove(lock)
 		return nil, err
 	}
-	return &Log{f: f, path: path, lock: lock}, nil
+	if err := lock(f, path); err != nil {
+		f.Close()
+		os.Remove(path) // O_EXCL means this file is ours and is empty
+		return nil, err
+	}
+	return &Log{f: f, path: path}, nil
 }
 
 // Open appends to an existing session, returning its events so the caller
-// can continue it. It refuses (with the holder's pid) if another live
-// process holds the session; a lock left by a dead process is stolen.
+// can continue it. It refuses if another process is writing the session.
 //
 // The lock is what keeps the replay invariant true under concurrency: two
 // processes appending to one log would interleave two conversations, and
 // every request digest written after the first interleaving would fail to
 // match its fold. Refusing is the only honest answer.
 func Open(path string) (*Log, []Event, error) {
-	events, err := ReadFile(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	lock, err := acquire(path)
-	if err != nil {
-		return nil, nil, err
-	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		os.Remove(lock)
+		return nil, nil, err
+	}
+	if err := lock(f, path); err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	// Read under the lock, never before taking it. Events read first can be
+	// a turn out of date by the time the lock is held — the previous writer
+	// may still have been finishing — and a fold over a stale prefix writes
+	// a digest the file itself will not reproduce. That is precisely the
+	// divergence the lock exists to prevent, arrived at from the other side.
+	events, err := ReadFile(path)
+	if err != nil {
+		f.Close()
 		return nil, nil, err
 	}
 	seq := 0
 	if n := len(events); n > 0 {
 		seq = events[n-1].Seq
 	}
-	return &Log{f: f, path: path, lock: lock, seq: seq}, events, nil
+	return &Log{f: f, path: path, seq: seq}, events, nil
+}
+
+// lock takes an exclusive advisory lock on the session file itself. The
+// kernel owns it: it belongs to this open file description and is released
+// when the descriptor closes, including when the process dies, however it
+// dies. So there is no lock file, no recorded pid, and no staleness.
+//
+// A pid file cannot do this honestly, which is why it is not one. Judging a
+// lock stale means reading a pid, asking whether it is alive, and removing
+// a file — three steps that are not one operation, so two processes
+// starting together can each remove the other's lock and both proceed,
+// which is the interleaving the lock exists to prevent. And pids are
+// recycled: an unrelated process inheriting a dead writer's pid makes the
+// session look busy forever, with nothing telling the user what to delete.
+func lock(f *os.File, path string) error {
+	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, syscall.EWOULDBLOCK) {
+		return fmt.Errorf("session %s is in use by another ask process", filepath.Base(path))
+	}
+	return fmt.Errorf("locking %s: %w", path, err)
 }
 
 // Path returns the session file path.
@@ -123,12 +151,11 @@ func (l *Log) Append(t Type, data any) (Event, error) {
 // Sync fsyncs the file.
 func (l *Log) Sync() error { return l.f.Sync() }
 
-// Close syncs, releases the lock, and closes the file.
+// Close syncs and closes the file, which releases the lock.
 func (l *Log) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	err := l.f.Sync()
-	os.Remove(l.lock)
 	return errors.Join(err, l.f.Close())
 }
 
@@ -236,48 +263,14 @@ func newID() string {
 	return fmt.Sprintf("%s-%x", time.Now().UTC().Format("20060102-150405"), b)
 }
 
-// acquire takes path.lock via O_EXCL, stealing locks whose holder is dead.
-func acquire(path string) (string, error) {
-	lock := path + ".lock"
-	for range 2 {
-		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		if err == nil {
-			fmt.Fprintf(f, "%d\n", os.Getpid())
-			f.Close()
-			return lock, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return "", err
-		}
-		pid, perr := readPid(lock)
-		if perr == nil && alive(pid) {
-			return "", fmt.Errorf("session %s is in use by running process %d", filepath.Base(path), pid)
-		}
-		os.Remove(lock) // stale: holder is gone
-	}
-	return "", fmt.Errorf("could not lock %s", path)
-}
-
-func readPid(lock string) (int, error) {
-	b, err := os.ReadFile(lock)
-	if err != nil {
-		return 0, err
-	}
-	return strconv.Atoi(strings.TrimSpace(string(b)))
-}
-
-func alive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	return syscall.Kill(pid, 0) == nil || errors.Is(syscall.Kill(pid, 0), syscall.EPERM)
-}
-
 // SetCurrent atomically repoints dir/current at the given session file.
-// This is what `ask -c` follows.
+// This is what a bare `ask` follows to continue a conversation, via Latest.
 func SetCurrent(l *Log) {
 	dir := filepath.Dir(l.path)
-	tmp := filepath.Join(dir, ".current.tmp")
+	// Named per process: a shared temporary name lets two concurrent runs
+	// delete each other's half-made symlink, and the rename that follows
+	// then fails for no reason worth having.
+	tmp := filepath.Join(dir, fmt.Sprintf(".current.%d.tmp", os.Getpid()))
 	os.Remove(tmp)
 	if err := os.Symlink(filepath.Base(l.path), tmp); err != nil {
 		return // best effort; Latest falls back to newest file

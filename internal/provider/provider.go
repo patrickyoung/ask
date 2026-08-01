@@ -246,7 +246,10 @@ func New(spec string) (Provider, string, error) {
 	if !ok || model == "" {
 		return nil, "", fmt.Errorf("model must be provider/model, got %q", spec)
 	}
-	gateway := oauthClient()
+	gateway, err := oauthClient()
+	if err != nil {
+		return nil, "", err
+	}
 	switch name {
 	case "anthropic":
 		vopts, err := vertexOptions()
@@ -281,7 +284,7 @@ func New(spec string) (Provider, string, error) {
 			base = "https://chatgpt.com/backend-api/codex"
 		}
 		return NewOpenAICodex(base, hc), model, nil
-	case "gemini", "google":
+	case "gemini":
 		k, err := key("GEMINI_API_KEY", gateway != nil)
 		if err != nil {
 			return nil, "", err

@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"time"
 
-	"ask/internal/auth"
+	"github.com/patrickyoung/ask/internal/auth"
 )
 
 // storedAuthClient returns an authenticating client backed by ~/.ask/auth.json.
@@ -32,43 +32,80 @@ type storedAuthTransport struct {
 }
 
 func (t *storedAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	tok, err := t.token()
+	cred, err := t.credential()
 	if err != nil {
 		return nil, err
 	}
 	req = req.Clone(req.Context())
-	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Authorization", "Bearer "+cred.AccessToken)
 	if t.provider == "openai-codex" {
 		req.Header.Set("OpenAI-Beta", "responses=2026-02-06")
 		req.Header.Set("x-codex-turn-state", "ask")
 	}
-	if cred, ok, err := auth.Get(t.provider); err == nil && ok && cred.AccountID != "" {
+	if cred.AccountID != "" {
 		req.Header.Set("ChatGPT-Account-Id", cred.AccountID)
 	}
 	return t.next.RoundTrip(req)
 }
 
-func (t *storedAuthTransport) token() (string, error) {
+// credential returns a usable credential, refreshing it if the access token
+// has expired.
+//
+// The refresh happens under the credential file's lock, and the credential
+// is read again once it is held. Refresh tokens rotate: two ask processes
+// refreshing at once would each spend the same token, and the slower one's
+// write would land on top of the faster one's — leaving a stored refresh
+// token the issuer has already retired. An unattended fan-out, which is
+// exactly what this tool invites, would log the user out of their own
+// account and give no clue why. The second process waits a moment and finds
+// the first one's new token already there.
+func (t *storedAuthTransport) credential() (auth.Credential, error) {
 	cred, ok, err := auth.Get(t.provider)
 	if err != nil {
-		return "", err
+		return cred, err
 	}
 	if !ok {
-		return "", fmt.Errorf("not logged in to %s", t.provider)
+		return cred, fmt.Errorf("not logged in to %s", t.provider)
 	}
-	if cred.AccessToken != "" && (cred.Expiry.IsZero() || time.Now().Before(cred.Expiry.Add(-30*time.Second))) {
-		return cred.AccessToken, nil
+	if usable(cred) {
+		return cred, nil
+	}
+	release, err := auth.Lock()
+	if err != nil {
+		return cred, err
+	}
+	defer release()
+	if cred, ok, err = auth.Get(t.provider); err != nil {
+		return cred, err
+	} else if !ok {
+		return cred, fmt.Errorf("not logged in to %s", t.provider)
+	}
+	if usable(cred) {
+		return cred, nil // another process refreshed while this one waited
 	}
 	if cred.RefreshToken == "" || cred.TokenURL == "" {
-		return "", fmt.Errorf("%s token expired and no refresh token endpoint is configured; run ask login %s again", t.provider, t.provider)
+		return cred, fmt.Errorf("%s token expired and no refresh token endpoint is configured; run ask login %s again", t.provider, t.provider)
 	}
 	if err := refreshStored(t.provider, &cred); err != nil {
-		return "", err
+		return cred, err
 	}
-	return cred.AccessToken, nil
+	return cred, nil
+}
+
+// usable reports whether an access token is present and will still be valid
+// when the request it is about to authenticate arrives.
+func usable(c auth.Credential) bool {
+	return c.AccessToken != "" &&
+		(c.Expiry.IsZero() || time.Now().Before(c.Expiry.Add(-30*time.Second)))
 }
 
 func refreshStored(provider string, cred *auth.Credential) error {
+	// Checked again here, not only at login: this URL came off disk, where
+	// it may have been written by an older ask, edited by hand, or dropped
+	// in by something else entirely. A credential file is not a promise.
+	if err := auth.CheckTokenURL(cred.TokenURL); err != nil {
+		return fmt.Errorf("%s: %w", provider, err)
+	}
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", cred.RefreshToken)
@@ -78,7 +115,9 @@ func refreshStored(provider string, cred *auth.Credential) error {
 	if cred.Scope != "" {
 		form.Set("scope", cred.Scope)
 	}
-	resp, err := http.PostForm(cred.TokenURL, form)
+	// tokenClient, not the default: the body carries the refresh token, so
+	// this must not follow a redirect to another host. See oauth.go.
+	resp, err := tokenClient.PostForm(cred.TokenURL, form)
 	if err != nil {
 		return fmt.Errorf("%s token refresh: %w", provider, err)
 	}

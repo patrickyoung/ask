@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"ask/internal/event"
-	"ask/internal/provider"
+	"github.com/patrickyoung/ask/internal/event"
+	"github.com/patrickyoung/ask/internal/provider"
 )
 
 // newChat wires a chat over a scripted provider and a real log in a temp

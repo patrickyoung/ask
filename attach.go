@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"unicode/utf8"
 
-	"ask/internal/provider"
+	"github.com/patrickyoung/ask/internal/provider"
 )
 
 // Attachments are read whole into memory, base64'd into a JSON event, and

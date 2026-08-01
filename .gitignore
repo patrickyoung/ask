@@ -1,3 +1,7 @@
-ask
+# The built binary, at the root only: an unanchored "ask" would also
+# swallow any directory that came to be named ask.
+/ask
+
+# Session logs and the conversation directory, wherever they land.
 *.jsonl
 .ask/

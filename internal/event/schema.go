@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"time"
 
-	"ask/internal/provider"
+	"github.com/patrickyoung/ask/internal/provider"
 )
 
 type Type string

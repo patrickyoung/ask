@@ -24,10 +24,10 @@ import (
 	"syscall"
 	"time"
 
-	"ask/internal/auth"
-	"ask/internal/chat"
-	"ask/internal/event"
-	"ask/internal/provider"
+	"github.com/patrickyoung/ask/internal/auth"
+	"github.com/patrickyoung/ask/internal/chat"
+	"github.com/patrickyoung/ask/internal/event"
+	"github.com/patrickyoung/ask/internal/provider"
 )
 
 const version = "0.1.0"
@@ -93,7 +93,8 @@ stored auth: ~/.ask/auth.json (or ASK_AUTH_FILE) for openai-codex/<model>
 env:  ASK_MODEL (-m) · ASK_SYSTEM (-S) · ASK_DIR (-d) · NO_COLOR
 gateway: <PROVIDER>_BASE_URL points a provider at a corporate gateway;
   ASK_AUTH_URL (+ ASK_AUTH_CLIENT_ID/_CLIENT_SECRET/_REFRESH_TOKEN/_SCOPE)
-  adds OAuth bearer auth — vendor keys then live gateway-side and are optional
+  adds OAuth bearer auth — vendor keys then live gateway-side and are
+  optional. Token endpoints must be https, except on loopback
 vertex: ANTHROPIC_VERTEX_PROJECT_ID + CLOUD_ML_REGION route anthropic/ models
   through Google Vertex AI (ANTHROPIC_VERTEX_BASE_URL overrides the endpoint)
 exit: 0 answered · 1 error · 2 context window full · 130 interrupted
@@ -250,7 +251,10 @@ func cmdAsk(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	data, piped := stdinData()
+	data, piped, err := stdinData()
+	if err != nil {
+		return fail(err)
+	}
 	content, err := message(strings.Join(fs.Args(), " "), data, files, *spec)
 	if err != nil {
 		return fail(err)
@@ -442,16 +446,26 @@ func sameOut() bool {
 // other character device, like /dev/null) contributes nothing. The bytes
 // come back untouched: what stdin is holding is decided by looking at it,
 // not by assuming.
-func stdinData() (data []byte, piped bool) {
+//
+// Too much input is an error, never a truncation. A filter that quietly
+// dropped the tail of its input would answer a question about the first
+// sixteen megabytes and present it as an answer about the file, and nothing
+// downstream could tell the difference. Reading one byte past the limit is
+// what makes "too much" detectable at all. A read that fails is reported as
+// what it was, rather than becoming an indistinguishable empty pipe.
+func stdinData() (data []byte, piped bool, err error) {
 	fi, err := os.Stdin.Stat()
 	if err != nil || fi.Mode()&os.ModeCharDevice != 0 {
-		return nil, false
+		return nil, false, nil
 	}
 	b, err := io.ReadAll(io.LimitReader(os.Stdin, maxAttachment+1))
 	if err != nil {
-		return nil, true
+		return nil, true, fmt.Errorf("reading stdin: %w", err)
 	}
-	return b, true
+	if len(b) > maxAttachment {
+		return nil, true, fmt.Errorf("piped input is larger than %d MB", maxAttachment>>20)
+	}
+	return b, true, nil
 }
 
 // message assembles one user message, in order: the attachments as they
@@ -468,9 +482,8 @@ func stdinData() (data []byte, piped bool) {
 func message(text string, data []byte, files []provider.Block, spec string) ([]provider.Block, error) {
 	blocks := files
 	if len(data) > 0 && !isText(data) {
-		if len(data) > maxAttachment {
-			return nil, fmt.Errorf("piped input is larger than %d MB", maxAttachment>>20)
-		}
+		// The size bound belongs to stdinData, which is the only thing that
+		// can tell "exactly at the limit" from "more where that came from".
 		b, err := classify("stdin", data)
 		if err != nil {
 			return nil, fmt.Errorf("stdin: %w", err)
@@ -740,6 +753,13 @@ func cmdLogin(args []string) int {
 	if refresh != "" && tokenURL == "" {
 		tokenURL = auth.CodexRefreshURL
 	}
+	// Refused at login rather than at the first refresh, so a wrong endpoint
+	// is a message now instead of a surprise in a month.
+	if tokenURL != "" {
+		if err := auth.CheckTokenURL(tokenURL); err != nil {
+			return fail(err)
+		}
+	}
 	var expiry time.Time
 	if expires > 0 {
 		expiry = time.Now().Add(expires).UTC()
@@ -786,8 +806,28 @@ func usageCode(fs *flag.FlagSet, err error) int {
 
 // sigCtx cancels on interrupt, so ^C ends the stream, logs the abort, and
 // leaves a session that can be continued.
+//
+// The handler unregisters itself the moment it fires, which signal.
+// NotifyContext does not do: it keeps the signal captured for the life of
+// the context, so every ^C after the first is swallowed. That is the wrong
+// bargain for a terminal program. The first ^C asks politely and gets a
+// clean session; if something below is not honoring cancellation, a second
+// takes the default action and kills the process, the way it does for every
+// other command in the shell. Nobody should have to reach for kill -9 on a
+// filter.
 func sigCtx() (context.Context, context.CancelFunc) {
-	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-ch:
+			signal.Stop(ch) // the next one is the operating system's
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() { signal.Stop(ch); cancel() }
 }
 
 func fail(err error) int {

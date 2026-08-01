@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"ask/internal/event"
-	"ask/internal/provider"
+	"github.com/patrickyoung/ask/internal/event"
+	"github.com/patrickyoung/ask/internal/provider"
 )
 
 // ErrOverflow is terminal and permanent: the conversation no longer fits

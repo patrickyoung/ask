@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"ask/internal/provider"
+	"github.com/patrickyoung/ask/internal/provider"
 )
 
 // Fold projects context-bearing events into the conversation a provider

@@ -63,6 +63,69 @@ func TestTokenGrants(t *testing.T) {
 	}
 }
 
+// TestTokenEndpointDoesNotFollowRedirects. The form carries a client secret
+// or a refresh token, and Go re-sends the body on a 307 — so following one
+// would hand ask's credentials to whatever host the redirect names. The
+// standard library strips the Authorization header across hosts, which is
+// no help at all when the secret is a form field. This must fail instead.
+func TestTokenEndpointDoesNotFollowRedirects(t *testing.T) {
+	var leaked atomic.Int64
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		if r.PostForm.Get("client_secret") != "" || r.PostForm.Get("refresh_token") != "" {
+			leaked.Add(1)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"access_token": "stolen"})
+	}))
+	defer evil.Close()
+	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, evil.URL, http.StatusTemporaryRedirect)
+	}))
+	defer idp.Close()
+
+	s := &tokenSource{url: idp.URL, id: "cid", secret: "shh", refresh: "r-1"}
+	tok, err := s.get()
+	if err == nil {
+		t.Fatalf("get() = %q, want an error rather than a redirect followed", tok)
+	}
+	if leaked.Load() != 0 {
+		t.Fatal("the client secret was sent to the redirect target")
+	}
+	if tok == "stolen" {
+		t.Fatal("used a token minted by the redirect target")
+	}
+}
+
+// TestCleartextGatewayIsRefusedAtConfiguration. ASK_AUTH_URL over http
+// would put the client secret on the wire. The refusal lands when the
+// provider is built — before any request, and with the variable named — so
+// a deploy script carrying http:// fails on the run that introduces it
+// rather than weeks later when a token first expires.
+func TestCleartextGatewayIsRefusedAtConfiguration(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "k")
+	t.Setenv("ANTHROPIC_VERTEX_PROJECT_ID", "")
+
+	t.Setenv("ASK_AUTH_URL", "http://idp.corp/oauth/token")
+	_, _, err := New("anthropic/claude-sonnet-5")
+	if err == nil {
+		t.Fatal("a cleartext gateway token endpoint was accepted")
+	}
+	if !strings.Contains(err.Error(), "ASK_AUTH_URL") {
+		t.Errorf("error %q does not name the variable at fault", err)
+	}
+
+	// Loopback is the exception, and it has to keep working: it is how a
+	// gateway is developed against, and how these tests run at all.
+	t.Setenv("ASK_AUTH_URL", "http://127.0.0.1:9999/token")
+	if _, _, err := New("anthropic/claude-sonnet-5"); err != nil {
+		t.Errorf("a loopback token endpoint was refused: %v", err)
+	}
+	t.Setenv("ASK_AUTH_URL", "https://idp.corp/oauth/token")
+	if _, _, err := New("anthropic/claude-sonnet-5"); err != nil {
+		t.Errorf("an https token endpoint was refused: %v", err)
+	}
+}
+
 func TestTokenRotation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.ParseForm()

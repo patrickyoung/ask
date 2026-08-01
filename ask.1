@@ -224,6 +224,15 @@ because the bytes are read whole, encoded into the session log, and encoded
 again into the request \(em a limit that can be raised from the command line
 is a limit that gets raised until something falls over further away.
 .PP
+Standard input is bounded by the same 16 MB, and crossing it is an error
+rather than a truncation. A filter that quietly dropped the tail of its
+input would answer a question about the first part of a file and present it
+as an answer about the file, and nothing downstream could tell the
+difference. In practice the model's context window is the real ceiling and
+it is far lower; see
+.B EXIT STATUS
+2.
+.PP
 The bytes live in the session log. A photograph makes a large JSONL record,
 and the session is correspondingly large; in exchange the log remains one
 self\-contained file that still replays exactly, and copying it still copies
@@ -244,10 +253,13 @@ or give the thread its own file with
 Every run that continues a session announces which one it joined and how
 many turns it already holds.
 .PP
-Only one process may write to a session at a time. A second is refused,
-naming the process that holds it: two writers would interleave two
-conversations into one file, and every digest written afterwards would
-fail its fold. A lock left behind by a dead process is stolen.
+Only one process may write to a session at a time; a second is refused.
+Two writers would interleave two conversations into one file, and every
+digest written afterwards would fail its fold. The lock is an exclusive
+.BR flock (2)
+on the session file, so the kernel releases it when the writer exits
+however it exits: a session is never stranded by a crash, and there is no
+lock file to find or delete.
 .SH ENVIRONMENT
 .TP
 .B ASK_MODEL
@@ -288,6 +300,20 @@ selects the refresh_token grant instead of client_credentials; and
 .B ASK_AUTH_SCOPE
 is sent when set. Tokens are held in memory for the life of the process
 and never written to disk.
+.IP
+The endpoint must be
+.BR https ,
+except on loopback. The request body carries a client secret or a refresh
+token, so http would put the long\-lived half of the credential on the wire
+in the clear; a gateway inside a corporate network is still reached across
+a network. The same rule applies to
+.B \-token\-url
+at
+.B ask login
+and to a
+.I token_url
+already stored in the credential file, and it is checked when the endpoint
+is configured rather than only when a token expires.
 .TP
 .B ANTHROPIC_VERTEX_PROJECT_ID
 Route
