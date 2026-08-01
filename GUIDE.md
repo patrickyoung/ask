@@ -1,6 +1,6 @@
 # The ask field guide
 
-Everything here was run on macOS against a real ChatGPT/Codex subscription
+Everything here was run on macOS 26.5.2 against a real ChatGPT/Codex subscription
 (`openai-codex/gpt-5.6-sol`) while writing this guide. Numbers are measured,
 not estimated. Where something failed, it says so.
 
