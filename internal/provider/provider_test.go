@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	openai "github.com/openai/openai-go/v3"
+	oopt "github.com/openai/openai-go/v3/option"
 )
 
 // req returns a request exercising every block type a conversation can
@@ -525,5 +529,51 @@ func TestUnknownProviderNamesTheRealOnes(t *testing.T) {
 		if !strings.Contains(err.Error(), p) {
 			t.Errorf("error %q does not name provider %q", err, p)
 		}
+	}
+}
+
+// TestOpenAIErrorRecoversUnrecognisedBody: the Codex backend reports
+// problems as {"detail":"..."}, a shape the SDK does not parse, and it
+// then renders the error as a bare status line. Losing that sentence
+// costs the user the actual reason — and costs Overflow() the prose it
+// classifies on, which is the difference between exit 2 (stop) and exit 1
+// (retry forever).
+func TestOpenAIErrorRecoversUnrecognisedBody(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		body     string
+		want     string
+		overflow bool
+	}{
+		{
+			name: "wrong model",
+			body: `{"detail":"The 'gpt-5.1-codex' model is not supported when using Codex with a ChatGPT account."}`,
+			want: "not supported when using Codex",
+		},
+		{
+			name:     "context full in an unrecognised shape",
+			body:     `{"detail":"Your input exceeds the context window of this model."}`,
+			want:     "context window",
+			overflow: true,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv := serve(t, 400, http.Header{"Content-Type": []string{"application/json"}}, c.body)
+			p := &OpenAI{c: openai.NewClient(oopt.WithAPIKey("k"), oopt.WithBaseURL(srv.URL), oopt.WithMaxRetries(0))}
+			var got error
+			for _, err := range p.Stream(context.Background(), contractReq()) {
+				got = err
+			}
+			var pe *Error
+			if !errors.As(got, &pe) {
+				t.Fatalf("error is %T (%v), want *provider.Error", got, got)
+			}
+			if !strings.Contains(pe.Msg, c.want) {
+				t.Errorf("error lost the provider's own words.\n got: %s\nwant it to contain: %s", pe.Msg, c.want)
+			}
+			if pe.Overflow() != c.overflow {
+				t.Errorf("Overflow() = %v, want %v for %q", pe.Overflow(), c.overflow, pe.Msg)
+			}
+		})
 	}
 }

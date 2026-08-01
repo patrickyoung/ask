@@ -228,8 +228,32 @@ func openaiErr(err error) error {
 			if d, perr := time.ParseDuration(ae.Response.Header.Get("Retry-After") + "s"); perr == nil {
 				e.RetryAfter = d
 			}
+			// The SDK formats the body it recognises. An endpoint that
+			// answers in another shape — the Codex backend says
+			// {"detail":"..."} — leaves it with the status line alone,
+			// dropping the one sentence that says what is wrong. Recover
+			// the body rather than report "400 Bad Request" and nothing.
+			// This is not only cosmetic: Overflow() reads provider prose,
+			// so a swallowed body turns a full context window into a
+			// generic error and costs the caller the exit code that tells
+			// it to stop retrying.
+			if ae.RawJSON() == "" {
+				if body := responseBody(ae.DumpResponse(true)); body != "" {
+					e.Msg += " " + body
+				}
+			}
 		}
 		return e
 	}
 	return &Error{Msg: err.Error()}
+}
+
+// responseBody returns the body from an httputil response dump: everything
+// after the blank line that ends the headers.
+func responseBody(dump []byte) string {
+	_, body, ok := strings.Cut(string(dump), "\r\n\r\n")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(body)
 }
