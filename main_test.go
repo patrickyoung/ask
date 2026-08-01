@@ -872,3 +872,21 @@ func TestEnvVarsAreDocumented(t *testing.T) {
 		}
 	}
 }
+
+// TestQuietStillPrintsTheAnswer: -q installs no renderer, so nothing
+// streams to stderr. The stdout echo may only be suppressed when the
+// renderer actually showed the answer — otherwise `ask -q "..."` in a
+// terminal, where both streams are the tty, prints nothing at all and the
+// run is silently lost. Found by pointing ask at its own source.
+func TestQuietStillPrintsTheAnswer(t *testing.T) {
+	for _, merge := range []bool{true, false} {
+		fake(t, 200, answerWire)
+		code, stdout, _ := execStreams(t, "", merge, "-q", "hi")
+		if code != 0 {
+			t.Fatalf("merge=%v: exit = %d", merge, code)
+		}
+		if stdout != "the answer\n" {
+			t.Errorf("merge=%v: ask -q produced %q, want the answer exactly once", merge, stdout)
+		}
+	}
+}

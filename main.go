@@ -305,7 +305,7 @@ func cmdAsk(args []string) int {
 		err = errNoText
 	}
 	done(log, err)
-	return finish(*jsonOut, answer, err)
+	return finish(*jsonOut, !*quiet, answer, err)
 }
 
 var errNoText = errors.New("the model returned no text")
@@ -384,8 +384,13 @@ func done(log *event.Log, err error) {
 }
 
 // finish writes the answer and maps the outcome to an exit code.
-func finish(jsonOut bool, answer string, err error) int {
-	if answer != "" && !jsonOut && !sameOut() {
+//
+// streamed says whether a renderer already put the answer on stderr. Only
+// then can printing it to a stdout that lands in the same place show it
+// twice — under -q nothing has been shown, so the answer must be printed
+// whatever the streams are pointed at.
+func finish(jsonOut, streamed bool, answer string, err error) int {
+	if answer != "" && !jsonOut && !(streamed && sameOut()) {
 		fmt.Println(answer)
 	}
 	switch {
