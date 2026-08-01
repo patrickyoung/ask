@@ -38,6 +38,20 @@ Five providers, one flag: `anthropic`, `openai`, `openai-codex`, `gemini`,
 `openrouter`. Models are `provider/model`, and OpenRouter models keep their
 own slash (`openrouter/anthropic/claude-sonnet-4.5`).
 
+On a ChatGPT subscription, import the Codex CLI's credentials instead of
+setting a key — and use the model that account is actually entitled to, or
+the API says so and nothing works:
+
+```
+ask login openai-codex -from-codex
+export ASK_MODEL=openai-codex/$(awk -F'"' '/^model/{print $2}' ~/.codex/config.toml)
+```
+
+**[GUIDE.md](GUIDE.md)** is the field guide: what `ask` is good at, what it
+is not, and the recipes — measured against a real Codex account, including
+the three things that will bite you (no clock, no timeout, and `xargs -P`
+silently scrambling parallel answers).
+
 ## The Unix contract
 
 | stream | carries |
