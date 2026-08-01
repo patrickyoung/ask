@@ -172,6 +172,50 @@ characters of `ps aux`** exactly as they were sent. `ask replay -step N`
 reconstitutes the precise request from the fold. Six months from now you can
 prove what the machine looked like when the finding was made.
 
+### Seeing
+
+`-a` attaches a file; binary on stdin is an attachment too. Measured live
+against Codex:
+
+```bash
+$ screencapture -x -t png /tmp/shot.png       # 858 KB, 2560x1440
+$ ask -a /tmp/shot.png "In one sentence: what application is in the
+    foreground and what is it showing?"
+
+Terminal is in the foreground, showing a Claude Code session editing and
+testing Go attachment-handling code.
+```
+
+It read my actual screen, correctly, in 4.2 seconds. The no-flag form works
+too, because binary stdin is sniffed:
+
+```bash
+screencapture -x -t png - | ask "what is on my screen?"
+```
+
+PDFs work the same way, and this is where it earns its keep — a document
+you would otherwise have to open and read:
+
+```bash
+$ cupsfilter q.txt > q.pdf
+$ ask -a q.pdf "What is the single biggest risk named in this document?"
+
+The biggest risk is customer concentration, with one customer accounting
+for 38% of revenue.
+```
+
+A file's type comes from its bytes, never its name, so `-a main.go` inlines
+as text (and the log stays greppable) while `-a shot.png` attaches. What a
+provider cannot carry is refused *before* anything is logged:
+
+```
+$ ask -a clip.wav "transcribe"
+ask: /tmp/clip.wav: openai-codex does not accept audio/wav
+     (it takes application/pdf, image/*)
+```
+
+For audio and video, point `-m` at Gemini, which carries both.
+
 ---
 
 ## What it is not good at
@@ -182,7 +226,7 @@ Measured, not theorised. Each of these was tested.
 | --- | --- | --- |
 | **No filesystem** | *"I can't access /tmp/secret.txt or read files from your filesystem."* | `cat file \| ask ...` |
 | **No commands** | *"I can't run commands or access this machine."* | `uname -a \| ask ...` |
-| **No vision** | Base64 of a PNG is just text to it | Use a vision-capable model in another tool |
+| ~~No vision~~ | Fixed: `-a photo.png`, or pipe binary in | see Attachments |
 | **No clock** | Asked the date, answered **"March 26, 2026"** — confidently wrong, on 1 August | `date \| ask ...` |
 | **No timeout** | 6 retries with escalating backoff; a flaky connection blocked for **minutes** | see below |
 | **Context ceiling** | ~1.2 MB fine; 6 MB never returned | rolling digest, below |
@@ -449,6 +493,8 @@ ask -n "question"           start a fresh one          ← use in scripts
 ask -f t.jsonl "question"   a named thread of your own
 cmd | ask "instruction"     stdin is evidence, argv is the instruction
 cmd | ask                   stdin alone is the whole question
+ask -a f.png "question"     attach a file; repeat -a for more
+cmd | ask "question"        binary on stdin attaches itself
 
 -q          answer only, no progress on stderr
 -json       raw event stream on stdout instead of the answer
@@ -471,3 +517,4 @@ stdout = answer · stderr = progress · ~/.ask/sessions/ = the record
 - Anything parallel: `-n`, and key the output by index.
 - Anything unattended: bound it with a timeout and branch on exit 2.
 - Anything you might have to defend later: it is already in the log.
+- Anything visual: `-a` it, or pipe it — but check the provider carries it.

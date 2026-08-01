@@ -33,6 +33,11 @@ func textTurn(s string) provider.ReplayTurn {
 	}
 }
 
+// say is a plain text message, the shape nearly every ask has.
+func say(text string) []provider.Block {
+	return []provider.Block{{Type: provider.Text, Text: text}}
+}
+
 func events(t *testing.T, log *event.Log) []event.Event {
 	t.Helper()
 	if err := log.Sync(); err != nil {
@@ -49,7 +54,7 @@ func events(t *testing.T, log *event.Log) []event.Event {
 // that order — and the log verifies.
 func TestSayLogsTheWholeTurn(t *testing.T) {
 	c, p, log := newChat(t, textTurn("  hello  "))
-	answer, err := c.Say(context.Background(), "hi")
+	answer, err := c.Say(context.Background(), say("hi"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,10 +92,10 @@ func TestSayLogsTheWholeTurn(t *testing.T) {
 // the log still verifies — which is the whole point of the fold.
 func TestConversationAccumulates(t *testing.T) {
 	c, p, log := newChat(t, textTurn("four"), textTurn("five"))
-	if _, err := c.Say(context.Background(), "2+2?"); err != nil {
+	if _, err := c.Say(context.Background(), say("2+2?")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Say(context.Background(), "and one more?"); err != nil {
+	if _, err := c.Say(context.Background(), say("and one more?")); err != nil {
 		t.Fatal(err)
 	}
 	second := p.Requests[1].Messages
@@ -112,7 +117,7 @@ func TestConversationAccumulates(t *testing.T) {
 // picks up the conversation, which is what `ask` does by default.
 func TestLoadContinuesAnExistingSession(t *testing.T) {
 	c, _, log := newChat(t, textTurn("first"))
-	if _, err := c.Say(context.Background(), "one"); err != nil {
+	if _, err := c.Say(context.Background(), say("one")); err != nil {
 		t.Fatal(err)
 	}
 	path := log.Path()
@@ -128,7 +133,7 @@ func TestLoadContinuesAnExistingSession(t *testing.T) {
 	if c2.Turns() != 1 {
 		t.Errorf("Turns() after load = %d, want 1", c2.Turns())
 	}
-	if _, err := c2.Say(context.Background(), "two"); err != nil {
+	if _, err := c2.Say(context.Background(), say("two")); err != nil {
 		t.Fatal(err)
 	}
 	all, err := event.ReadFile(path)
@@ -150,7 +155,7 @@ func TestRetryIsLoggedThenSucceeds(t *testing.T) {
 		provider.ReplayTurn{Err: &provider.Error{Status: 429, Msg: "slow down"}},
 		textTurn("ok"),
 	)
-	answer, err := c.Say(context.Background(), "hi")
+	answer, err := c.Say(context.Background(), say("hi"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +189,7 @@ func TestRetryIsLoggedThenSucceeds(t *testing.T) {
 // the caller sees the provider's own words.
 func TestPermanentErrorIsNotRetried(t *testing.T) {
 	c, p, _ := newChat(t, provider.ReplayTurn{Err: &provider.Error{Status: 400, Msg: "bad model"}})
-	if _, err := c.Say(context.Background(), "hi"); err == nil {
+	if _, err := c.Say(context.Background(), say("hi")); err == nil {
 		t.Fatal("permanent error was swallowed")
 	} else if !strings.Contains(err.Error(), "bad model") {
 		t.Errorf("error = %v, want the provider's words", err)
@@ -200,7 +205,7 @@ func TestOverflowIsNamed(t *testing.T) {
 	c, _, _ := newChat(t, provider.ReplayTurn{
 		Err: &provider.Error{Status: 400, Msg: "prompt is too long: 300000 tokens > 200000 maximum"},
 	})
-	_, err := c.Say(context.Background(), "hi")
+	_, err := c.Say(context.Background(), say("hi"))
 	if !errors.Is(err, ErrOverflow) {
 		t.Fatalf("error = %v, want ErrOverflow", err)
 	}
@@ -214,7 +219,7 @@ func TestCancelLogsPartialAndAbort(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c, _, log := newChat(t)
 	c.Provider = cancelling{cancel: cancel}
-	if _, err := c.Say(ctx, "hi"); !errors.Is(err, context.Canceled) {
+	if _, err := c.Say(ctx, say("hi")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
 
@@ -274,7 +279,7 @@ func TestAnswerExcludesReasoning(t *testing.T) {
 		},
 		Stop: "end",
 	})
-	answer, err := c.Say(context.Background(), "the question?")
+	answer, err := c.Say(context.Background(), say("the question?"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +302,7 @@ func TestDeltasReachTheDisplay(t *testing.T) {
 			seen.WriteString(text)
 		}
 	}
-	answer, err := c.Say(context.Background(), "hi")
+	answer, err := c.Say(context.Background(), say("hi"))
 	if err != nil {
 		t.Fatal(err)
 	}

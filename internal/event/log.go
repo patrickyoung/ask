@@ -48,7 +48,7 @@ func CreateFile(path string) (*Log, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		os.Remove(lock)
 		return nil, err
@@ -73,7 +73,7 @@ func Open(path string) (*Log, []Event, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		os.Remove(lock)
 		return nil, nil, err

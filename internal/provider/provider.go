@@ -103,6 +103,7 @@ const (
 	Text      BlockType = "text"
 	Reasoning BlockType = "reasoning"
 	Opaque    BlockType = "opaque"
+	Media     BlockType = "media" // an image, a document, a recording
 )
 
 // Block is one unit of message content. It is a flat union: which fields
@@ -116,6 +117,15 @@ type Block struct {
 
 	// Signature is the provider's opaque proof for a reasoning block.
 	Signature string `json:"signature,omitempty"`
+
+	// Media: the bytes, their type as detected when they were read, and
+	// the sanitized basename they arrived under. Data is base64 in JSON by
+	// virtue of being []byte, so the log holds the attachment itself and
+	// Fold stays a pure function of the log. MediaType is recorded rather
+	// than re-derived, so replaying a session never sniffs anything twice.
+	MediaType string `json:"media_type,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Data      []byte `json:"data,omitempty"`
 
 	// Opaque provider state: the provider-native form of an assistant
 	// turn, replayed verbatim to the same provider and ignored by others.

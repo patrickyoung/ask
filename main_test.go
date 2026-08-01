@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -816,7 +817,7 @@ func TestDocsCoverEveryFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	man := strings.ReplaceAll(string(raw), `\`, "")
-	for _, f := range []string{"-m", "-S", "-n", "-f", "-d", "-effort", "-max-tokens", "-json", "-q", "-check", "-step"} {
+	for _, f := range []string{"-m", "-S", "-n", "-a", "-f", "-d", "-effort", "-max-tokens", "-json", "-q", "-check", "-step"} {
 		if !strings.Contains(usageText, f+" ") && !strings.Contains(usageText, f+"\n") {
 			t.Errorf("flag %s is missing from ask help", f)
 		}
@@ -888,5 +889,135 @@ func TestQuietStillPrintsTheAnswer(t *testing.T) {
 		if stdout != "the answer\n" {
 			t.Errorf("merge=%v: ask -q produced %q, want the answer exactly once", merge, stdout)
 		}
+	}
+}
+
+// TestAttachReachesTheProvider is the whole feature end to end: -a puts an
+// image on the wire, in the right shape, and the session that records it
+// still replays exactly.
+func TestAttachReachesTheProvider(t *testing.T) {
+	dir, _, bodies := fake(t, 200, answerWire)
+	shot := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(shot, png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := exec(t, "", "-a", shot, "what is this?")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr:\n%s", code, stderr)
+	}
+	if stdout != "the answer\n" {
+		t.Errorf("stdout = %q", stdout)
+	}
+
+	body := (*bodies)[0]
+	for _, want := range []string{`"type":"image"`, `"media_type":"image/png"`, `"what is this?"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("request missing %s:\n%s", want, body)
+		}
+	}
+
+	events, err := event.ReadFile(filepath.Join(dir, sessions(t, dir)[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := event.Check(events); err != nil {
+		t.Errorf("a session carrying an image does not replay: %v", err)
+	}
+	// The bytes are in the log, so the fold stays a function of the log.
+	u, err := event.As[event.UserData](events[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(u.Blocks) != 2 {
+		t.Fatalf("user event has %d blocks, want image then text: %+v", len(u.Blocks), u.Blocks)
+	}
+	if u.Blocks[0].Type != provider.Media || !bytes.Equal(u.Blocks[0].Data, png) {
+		t.Errorf("image bytes not recorded verbatim: %+v", u.Blocks[0])
+	}
+	if u.Blocks[1].Type != provider.Text {
+		t.Errorf("text block is not last: %+v", u.Blocks[1])
+	}
+}
+
+// TestBinaryStdinBecomesAnAttachment: screencapture -x -t png - | ask "..."
+// should need no new flag. Text stdin keeps its old meaning.
+func TestBinaryStdinBecomesAnAttachment(t *testing.T) {
+	_, _, bodies := fake(t, 200, answerWire)
+	if code, _, e := exec(t, string(png), "what is this?"); code != 0 {
+		t.Fatalf("exit = %d: %s", code, e)
+	}
+	if body := (*bodies)[0]; !strings.Contains(body, `"media_type":"image/png"`) {
+		t.Errorf("piped PNG did not become an attachment:\n%s", body)
+	}
+
+	_, _, bodies2 := fake(t, 200, answerWire)
+	if code, _, e := exec(t, "some plain text", "summarise"); code != 0 {
+		t.Fatalf("exit = %d: %s", code, e)
+	}
+	body := (*bodies2)[0]
+	if !strings.Contains(body, "<stdin>") || strings.Contains(body, "media_type") {
+		t.Errorf("text stdin changed meaning:\n%s", body)
+	}
+}
+
+// TestTextAttachmentStaysReadable: attaching a source file must not turn
+// the log into base64. grep and jq over sessions are load-bearing.
+func TestTextAttachmentStaysReadable(t *testing.T) {
+	dir, _, _ := fake(t, 200, answerWire)
+	src := filepath.Join(t.TempDir(), "hello.go")
+	if err := os.WriteFile(src, []byte("package main // hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, e := exec(t, "", "-a", src, "review this"); code != 0 {
+		t.Fatalf("exit = %d: %s", code, e)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, sessions(t, dir)[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "package main // hello") {
+		t.Error("a text attachment was not readable in the log")
+	}
+	if !strings.Contains(string(raw), "hello.go") {
+		t.Error("the log does not say which file it was")
+	}
+}
+
+// TestUnsendableAttachmentLeavesNoSession: validation happens before the
+// log exists, so a refused attachment cannot poison every later fold.
+func TestUnsendableAttachmentLeavesNoSession(t *testing.T) {
+	dir, calls, _ := fake(t, 200, answerWire)
+	clip := filepath.Join(t.TempDir(), "clip.wav")
+	if err := os.WriteFile(clip, wav, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := exec(t, "", "-a", clip, "transcribe this")
+	if code != 1 {
+		t.Errorf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "does not accept audio/wav") {
+		t.Errorf("stderr = %q", stderr)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	if calls.Load() != 0 {
+		t.Error("sent a request the provider cannot answer")
+	}
+	if n := len(sessions(t, dir)); n != 0 {
+		t.Errorf("a refused attachment left %d session files behind", n)
+	}
+}
+
+// TestSessionFilesArePrivate: logs now hold photographs and documents.
+func TestSessionFilesArePrivate(t *testing.T) {
+	dir, _, _ := fake(t, 200, answerWire)
+	exec(t, "", "hi")
+	fi, err := os.Stat(filepath.Join(dir, sessions(t, dir)[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("session file mode is %04o, want 0600", perm)
 	}
 }

@@ -162,6 +162,11 @@ func geminiParams(req Request) (*genai.GenerateContentConfig, []*genai.Content, 
 			switch b.Type {
 			case Text:
 				c.Parts = append(c.Parts, &genai.Part{Text: b.Text})
+			case Media:
+				// Gemini takes the raw bytes; the SDK base64s them.
+				c.Parts = append(c.Parts, &genai.Part{
+					InlineData: &genai.Blob{MIMEType: b.MediaType, Data: b.Data},
+				})
 			case Reasoning: // foreign or signature-less; not replayable
 			}
 		}

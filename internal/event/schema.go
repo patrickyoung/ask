@@ -65,8 +65,29 @@ type Header struct {
 	System  string            `json:"system"`
 }
 
+// UserData is one message from the user. Blocks carries it in the order it
+// was given — attachments in the order they were named on the command
+// line, then the text — because that order is meaningful and only the
+// message itself knows it.
+//
+// Text is what a message used to be, and is still what a text-only message
+// is: the common case stays one readable JSON string, so a session log
+// remains something grep and jq can work with. Fold reads Blocks when they
+// are present and falls back to Text, which is also how logs written
+// before attachments existed keep replaying.
 type UserData struct {
-	Text string `json:"text"`
+	Text   string           `json:"text,omitempty"`
+	Blocks []provider.Block `json:"blocks,omitempty"`
+}
+
+// Content is the message as the provider sees it. Exactly one of the two
+// representations is authoritative, and Blocks wins when it is present, so
+// there is never a question of which was sent.
+func (u UserData) Content() []provider.Block {
+	if len(u.Blocks) > 0 {
+		return u.Blocks
+	}
+	return []provider.Block{{Type: provider.Text, Text: u.Text}}
 }
 
 // Turn is one assistant response. Blocks are logged exactly as streamed,

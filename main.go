@@ -34,7 +34,7 @@ const version = "0.1.0"
 
 const usageText = `ask — put a question through a language model, get the answer on stdout
 
-  ask [flags] [message ...]       ask; piped stdin composes with the message
+  ask [flags] [message ...]       ask; -a attaches files, stdin composes
   ask replay [flags] [session]    re-render a session (-check verifies replay)
   ask system                      print the default system prompt
   ask login openai-codex [flags]  store subscription auth (-from-codex)
@@ -52,9 +52,17 @@ one: git diff | ask "write a commit message".
 conversation: each run continues the current session, so ask remembers what
 was said. -n starts a fresh one, -f keeps a thread in a file of your own.
 
+attachments: -a takes a file and repeats. What a file is decided by reading
+it, never by its name: text is inlined, images, PDFs, audio and video ride
+as attachments. Binary on stdin is an attachment too, so
+screencapture -x -t png - | ask "what is this?" needs no flag. Providers
+differ in what they carry, and ask says so before sending, not after.
+
 flags:
   -m spec       provider/model, e.g. anthropic/claude-sonnet-5 ($ASK_MODEL);
                 when continuing, defaults to the session's own model
+  -a file       attach a file; repeat for more (16 max, 16MB each, 32MB
+                total). The bytes land in the session log, so it replays
   -S text       system prompt, replacing the default ($ASK_SYSTEM). -S ""
                 sends none; compose with -S "$(ask system; cat style.md)"
   -n            start a new conversation instead of continuing
@@ -194,7 +202,9 @@ func cmdAsk(args []string) int {
 		maxTokens = fs.Int("max-tokens", 16384, "max output tokens")
 		jsonOut   = fs.Bool("json", false, "emit raw events on stdout")
 		quiet     = fs.Bool("q", false, "no progress on stderr")
+		attached  attachFlag
 	)
+	fs.Var(&attached, "a", "attach a file; repeat for more")
 	usage(fs, `ask [flags] [message ...]`)
 	if err := fs.Parse(args); err != nil {
 		return usageCode(fs, err)
@@ -233,9 +243,19 @@ func cmdAsk(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
+	// Attachments are read, typed, sized and checked against the provider
+	// here — before any session file exists — so a run that cannot be sent
+	// never becomes an event that every later fold would rebuild.
+	files, err := attach(attached, *spec)
+	if err != nil {
+		return fail(err)
+	}
 	data, piped := stdinData()
-	message := compose(strings.Join(fs.Args(), " "), data)
-	if message == "" {
+	content, err := message(strings.Join(fs.Args(), " "), data, files, *spec)
+	if err != nil {
+		return fail(err)
+	}
+	if len(content) == 0 {
 		if piped {
 			return fail(errors.New("stdin was empty and no message was given"))
 		}
@@ -297,7 +317,7 @@ func cmdAsk(args []string) int {
 
 	ctx, stop := sigCtx()
 	defer stop()
-	answer, err := c.Say(ctx, message)
+	answer, err := c.Say(ctx, content)
 	if err == nil && answer == "" {
 		// A turn that streamed nothing is a failed run, not a quiet
 		// success: the next program in the pipe would read an empty
@@ -419,24 +439,59 @@ func sameOut() bool {
 }
 
 // stdinData reads piped or redirected stdin to EOF. A terminal (or any
-// other character device, like /dev/null) contributes nothing.
-func stdinData() (data string, piped bool) {
+// other character device, like /dev/null) contributes nothing. The bytes
+// come back untouched: what stdin is holding is decided by looking at it,
+// not by assuming.
+func stdinData() (data []byte, piped bool) {
 	fi, err := os.Stdin.Stat()
 	if err != nil || fi.Mode()&os.ModeCharDevice != 0 {
-		return "", false
+		return nil, false
 	}
-	b, err := io.ReadAll(os.Stdin)
+	b, err := io.ReadAll(io.LimitReader(os.Stdin, maxAttachment+1))
 	if err != nil {
-		return "", true
+		return nil, true
 	}
-	return strings.TrimSpace(string(b)), true
+	return b, true
 }
 
-// compose merges an instruction and piped stdin into one message, the way
-// a shell user expects: git diff | ask "write a commit message". Stdin
-// alone is the whole message. Unlike an agent, ask has no tools, so there
-// is nowhere to put input except in the conversation: a pipe too large for
-// the context window is reported as such rather than silently truncated.
+// message assembles one user message, in order: the attachments as they
+// were named, then stdin if it turned out to be an attachment itself, then
+// the text. Media before text is what every provider asks for, and it is
+// the only order there is — a message is one argv string, so the sole
+// ordering a caller can express is the order of the -a flags, and that is
+// preserved exactly.
+//
+// stdin keeps its old meaning when it is text: it rides inside the message
+// delimited as evidence, so `git diff | ask "write a commit message"` is
+// unchanged. When stdin is a PNG, it becomes an attachment instead —
+// `screencapture -x -t png - | ask "what is this?"` needs no new flag.
+func message(text string, data []byte, files []provider.Block, spec string) ([]provider.Block, error) {
+	blocks := files
+	if len(data) > 0 && !isText(data) {
+		if len(data) > maxAttachment {
+			return nil, fmt.Errorf("piped input is larger than %d MB", maxAttachment>>20)
+		}
+		b, err := classify("stdin", data)
+		if err != nil {
+			return nil, fmt.Errorf("stdin: %w", err)
+		}
+		if err := provider.Accepts(spec, b.MediaType); err != nil {
+			return nil, fmt.Errorf("stdin: %w", err)
+		}
+		blocks = append(blocks, b)
+		data = nil
+	}
+	if t := compose(text, strings.TrimSpace(string(data))); t != "" {
+		blocks = append(blocks, provider.Block{Type: provider.Text, Text: t})
+	}
+	return blocks, nil
+}
+
+// compose merges an instruction and textual stdin, the way a shell user
+// expects: git diff | ask "write a commit message". Stdin alone is the
+// whole message. Unlike an agent, ask has no tools, so there is nowhere to
+// put input except in the conversation: a pipe too large for the context
+// window is reported as such rather than silently truncated.
 func compose(text, data string) string {
 	switch {
 	case data == "":

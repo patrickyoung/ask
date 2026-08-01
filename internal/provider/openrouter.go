@@ -197,6 +197,21 @@ func openrouterParams(req Request) (openai.ChatCompletionNewParams, []option.Req
 			}
 			continue
 		}
+		// A user message with attachments becomes one multi-part message;
+		// plain text keeps the simple form.
+		if hasMedia(m) {
+			var parts []openai.ChatCompletionContentPartUnionParam
+			for _, b := range m.Blocks {
+				switch b.Type {
+				case Text:
+					parts = append(parts, openai.TextContentPart(b.Text))
+				case Media:
+					parts = append(parts, openrouterMedia(b))
+				}
+			}
+			params.Messages = append(params.Messages, openai.UserMessage(parts))
+			continue
+		}
 		for _, b := range m.Blocks {
 			if b.Type == Text {
 				params.Messages = append(params.Messages, openai.UserMessage(b.Text))
@@ -204,6 +219,24 @@ func openrouterParams(req Request) (openai.ChatCompletionNewParams, []option.Req
 		}
 	}
 	return params, opts, nil
+}
+
+// openrouterMedia maps one attachment. Images are an image_url part;
+// anything else is a file part, which is where OpenRouter's document
+// handling picks it up and which is the only shape carrying a filename.
+func openrouterMedia(b Block) openai.ChatCompletionContentPartUnionParam {
+	url := dataURL(b.MediaType, b.Data)
+	if strings.HasPrefix(b.MediaType, "image/") {
+		return openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{URL: url})
+	}
+	name := b.Name
+	if name == "" {
+		name = "attachment"
+	}
+	return openai.FileContentPart(openai.ChatCompletionContentPartFileFileParam{
+		Filename: openai.String(name),
+		FileData: openai.String(url),
+	})
 }
 
 // extraInt and extraFloat read a number the SDK has no field for. A key

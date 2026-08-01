@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"iter"
@@ -187,13 +188,29 @@ func (p *OpenAI) params(req Request) responses.ResponseNewParams {
 				continue
 			}
 		}
+		role := responses.EasyInputMessageRoleUser
+		if m.Role == Assistant {
+			role = responses.EasyInputMessageRoleAssistant
+		}
+		// A message carrying attachments becomes one item with a content
+		// list; a plain text message keeps the simpler string form it has
+		// always had.
+		if hasMedia(m) {
+			var content responses.ResponseInputMessageContentListParam
+			for _, b := range m.Blocks {
+				switch b.Type {
+				case Text:
+					content = append(content, responses.ResponseInputContentParamOfInputText(b.Text))
+				case Media:
+					content = append(content, openaiMedia(b))
+				}
+			}
+			items = append(items, responses.ResponseInputItemParamOfMessage(content, role))
+			continue
+		}
 		for _, b := range m.Blocks {
 			switch b.Type {
 			case Text:
-				role := responses.EasyInputMessageRoleUser
-				if m.Role == Assistant {
-					role = responses.EasyInputMessageRoleAssistant
-				}
 				items = append(items, responses.ResponseInputItemParamOfMessage(b.Text, role))
 			case Reasoning: // foreign; not replayable
 			}
@@ -201,6 +218,45 @@ func (p *OpenAI) params(req Request) responses.ResponseNewParams {
 	}
 	params.Input = responses.ResponseNewParamsInputUnion{OfInputItemList: items}
 	return params
+}
+
+func hasMedia(m Message) bool {
+	for _, b := range m.Blocks {
+		if b.Type == Media {
+			return true
+		}
+	}
+	return false
+}
+
+// openaiMedia maps one attachment. Images travel as a data URL; everything
+// else is a file, which is the only shape that carries a filename — and
+// the API wants one.
+func openaiMedia(b Block) responses.ResponseInputContentUnionParam {
+	url := dataURL(b.MediaType, b.Data)
+	if strings.HasPrefix(b.MediaType, "image/") {
+		return responses.ResponseInputContentUnionParam{
+			OfInputImage: &responses.ResponseInputImageParam{
+				ImageURL: openai.String(url),
+				Detail:   responses.ResponseInputImageDetailAuto,
+			},
+		}
+	}
+	name := b.Name
+	if name == "" {
+		name = "attachment"
+	}
+	return responses.ResponseInputContentUnionParam{
+		OfInputFile: &responses.ResponseInputFileParam{
+			Filename: openai.String(name),
+			FileData: openai.String(url),
+		},
+	}
+}
+
+// dataURL is the base64 data: form every OpenAI-shaped API takes.
+func dataURL(mediaType string, data []byte) string {
+	return "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(data)
 }
 
 // openaiOpaque returns the turn's raw output items when it came from

@@ -102,6 +102,14 @@ and
 do the same.
 .SH OPTIONS
 .TP
+.BI \-a " file"
+Attach a file. Repeat for more, and they reach the model in the order
+given. What a file is comes from reading it, never from its name: a text
+file is inlined with its name, and an image, PDF, audio or video file is
+attached. See
+.B ATTACHMENTS
+below.
+.TP
 .BI \-m " provider/model"
 Model to use, for example
 .IR anthropic/claude\-sonnet\-5 .
@@ -160,6 +168,66 @@ Verify the replay invariant and exit.
 .RB ( replay )
 Print the exact provider request logged at this sequence number, with the
 conversation reconstituted from the fold its digest stands for.
+.SH ATTACHMENTS
+.B \-a
+attaches a file, and repeats:
+.PP
+.EX
+ask \-a chart.png "what is the trend?"
+ask \-a q3.pdf \-a q4.pdf "what changed between these quarters?"
+.EE
+.PP
+What a file is comes from its content. A name is a name, not a type: a
+.I .png
+holding a shell script is a shell script, and a
+.I .txt
+holding a PNG is an image. A file whose bytes carry a recognised signature
+is that type; anything else that is valid UTF\-8 without NUL bytes is text;
+anything else is refused, by name, before it is sent.
+.PP
+Text files are inlined, labelled with their base name \(em
+.B \-a main.go
+is
+.B cat main.go
+with a tag \(em so a session log stays something
+.BR grep (1)
+and
+.BR jq (1)
+can read. Images, PDFs, audio and video are attached as bytes.
+.PP
+Binary arriving on standard input is an attachment too, so no flag is
+needed for the common case:
+.PP
+.EX
+screencapture \-x \-t png \- \(bv ask "what is on my screen?"
+.EE
+.PP
+Text on standard input keeps its old meaning and rides inside the message
+as evidence.
+.SS What each provider carries
+.TS
+tab(:);
+l l.
+anthropic:images, PDF
+openai, openai\-codex:images, PDF
+gemini:images, audio, video, PDF
+openrouter:images, PDF, WAV and MP3
+.TE
+.PP
+An attachment a provider cannot carry is refused before the session log is
+touched, naming the provider and what it does take. This is checked per
+provider, not per model: a model that is merely the wrong model for the job
+is the provider's own error to report.
+.SS Limits
+At most 16 attachments, 16 MB each, 32 MB in one message. They are fixed,
+because the bytes are read whole, encoded into the session log, and encoded
+again into the request \(em a limit that can be raised from the command line
+is a limit that gets raised until something falls over further away.
+.PP
+The bytes live in the session log. A photograph makes a large JSONL record,
+and the session is correspondingly large; in exchange the log remains one
+self\-contained file that still replays exactly, and copying it still copies
+everything it means. Session files are created mode 0600.
 .SH CONVERSATIONS
 A session is one JSONL file in the conversation directory, named by a
 sortable id. The

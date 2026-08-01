@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -576,4 +577,127 @@ func TestOpenAIErrorRecoversUnrecognisedBody(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMediaReachesEveryAdapter: an attachment has to arrive in each
+// provider's own shape. A block that silently vanished in conversion would
+// look exactly like a model that ignored the picture.
+func TestMediaReachesEveryAdapter(t *testing.T) {
+	img := Block{Type: Media, MediaType: "image/png", Name: "shot.png", Data: []byte("\x89PNG\r\n\x1a\nDATA")}
+	doc := Block{Type: Media, MediaType: "application/pdf", Name: "report.pdf", Data: []byte("%PDF-1.7 DATA")}
+	withMedia := func(bs ...Block) Request {
+		r := Request{Model: "test-model", System: "be brief", MaxTokens: 100}
+		r.Messages = []Message{{Role: User, Blocks: append(bs, Block{Type: Text, Text: "what is this?"})}}
+		return r
+	}
+	// base64 of the PNG bytes, which is what must appear on every wire.
+	// Computed, not written out: a hand-typed constant tests the typist.
+	b64 := base64.StdEncoding.EncodeToString(img.Data)
+
+	t.Run("anthropic image", func(t *testing.T) {
+		p, err := anthropicParams(withMedia(img))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := mustJSON(t, p)
+		for _, want := range []string{`"type":"image"`, `"media_type":"image/png"`, b64, "what is this?"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("missing %s in:\n%s", want, s)
+			}
+		}
+	})
+	t.Run("anthropic pdf", func(t *testing.T) {
+		p, err := anthropicParams(withMedia(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s := mustJSON(t, p); !strings.Contains(s, `"type":"document"`) {
+			t.Errorf("pdf did not become a document block:\n%s", s)
+		}
+	})
+	t.Run("openai", func(t *testing.T) {
+		s := mustJSON(t, openaiParams(withMedia(img, doc)))
+		for _, want := range []string{
+			`"type":"input_image"`, "data:image/png;base64," + b64,
+			`"type":"input_file"`, `"filename":"report.pdf"`, `"type":"input_text"`,
+		} {
+			if !strings.Contains(s, want) {
+				t.Errorf("missing %s in:\n%s", want, s)
+			}
+		}
+	})
+	t.Run("gemini", func(t *testing.T) {
+		_, contents, err := geminiParams(withMedia(img))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := mustJSON(t, contents)
+		if !strings.Contains(s, `"mimeType":"image/png"`) || !strings.Contains(s, b64) {
+			t.Errorf("gemini inlineData missing:\n%s", s)
+		}
+	})
+	t.Run("openrouter", func(t *testing.T) {
+		params, _, err := openrouterParams(withMedia(img, doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := mustJSON(t, params)
+		for _, want := range []string{
+			`"type":"image_url"`, "data:image/png;base64," + b64,
+			`"type":"file"`, `"filename":"report.pdf"`,
+		} {
+			if !strings.Contains(s, want) {
+				t.Errorf("missing %s in:\n%s", want, s)
+			}
+		}
+	})
+}
+
+// TestTextOnlyMessagesAreUnchanged: adding attachments must not alter the
+// shape of the request every other ask sends.
+func TestTextOnlyMessagesAreUnchanged(t *testing.T) {
+	s := mustJSON(t, openaiParams(req("openai")))
+	if strings.Contains(s, "input_text") {
+		t.Errorf("a text-only message grew a content list:\n%s", s)
+	}
+}
+
+// TestAcceptsIsProviderShaped pins the capability table, including that it
+// says what the provider does take.
+func TestAcceptsIsProviderShaped(t *testing.T) {
+	for _, c := range []struct {
+		spec, mediaType string
+		ok              bool
+	}{
+		{"anthropic/claude-sonnet-5", "image/png", true},
+		{"anthropic/claude-sonnet-5", "application/pdf", true},
+		{"anthropic/claude-sonnet-5", "audio/wav", false},
+		{"anthropic/claude-sonnet-5", "video/mp4", false},
+		{"gemini/gemini-3-flash", "audio/wav", true},
+		{"gemini/gemini-3-flash", "video/mp4", true},
+		{"openai-codex/gpt-5.6-sol", "image/jpeg", true},
+		{"openai-codex/gpt-5.6-sol", "audio/mpeg", false},
+		{"openrouter/anthropic/claude-sonnet-4.5", "image/webp", true},
+		{"openrouter/anthropic/claude-sonnet-4.5", "video/mp4", false},
+	} {
+		err := Accepts(c.spec, c.mediaType)
+		if (err == nil) != c.ok {
+			t.Errorf("Accepts(%q, %q) = %v, want ok=%v", c.spec, c.mediaType, err, c.ok)
+		}
+		if err != nil && !strings.Contains(err.Error(), "it takes") {
+			t.Errorf("refusal does not say what is accepted: %v", err)
+		}
+	}
+	if err := Accepts("nosuch/model", "image/png"); err == nil {
+		t.Error("unknown provider accepted")
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

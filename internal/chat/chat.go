@@ -56,9 +56,11 @@ func (c *Chat) Turns() int {
 	return n
 }
 
-// Say appends a message, asks the model, and returns the answer.
-func (c *Chat) Say(ctx context.Context, text string) (string, error) {
-	if _, err := c.append(event.User, event.UserData{Text: text}); err != nil {
+// Say appends a message, asks the model, and returns the answer. The
+// message is an ordered list of blocks: attachments as they were named,
+// then the text.
+func (c *Chat) Say(ctx context.Context, content []provider.Block) (string, error) {
+	if _, err := c.append(event.User, userData(content)); err != nil {
 		return "", err
 	}
 	msgs, err := event.Fold(c.events)
@@ -107,6 +109,17 @@ func (c *Chat) Say(ctx context.Context, text string) (string, error) {
 		return "", err
 	}
 	return answer(turn.Blocks), nil
+}
+
+// userData picks how a message is recorded. A message that is only text —
+// which is nearly all of them — is written as one JSON string, so a
+// session log stays something grep and jq can read. Anything richer is
+// written as its blocks, in order.
+func userData(content []provider.Block) event.UserData {
+	if len(content) == 1 && content[0].Type == provider.Text {
+		return event.UserData{Text: content[0].Text}
+	}
+	return event.UserData{Blocks: content}
 }
 
 func (c *Chat) append(t event.Type, data any) (event.Event, error) {

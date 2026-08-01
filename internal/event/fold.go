@@ -22,9 +22,7 @@ func Fold(events []Event) ([]provider.Message, error) {
 			if err != nil {
 				return nil, err
 			}
-			msgs = append(msgs, provider.Message{Role: provider.User, Blocks: []provider.Block{
-				{Type: provider.Text, Text: u.Text},
-			}})
+			msgs = append(msgs, provider.Message{Role: provider.User, Blocks: u.Content()})
 		case Assistant:
 			t, err := As[Turn](e)
 			if err != nil {

@@ -52,6 +52,38 @@ is not, and the recipes — measured against a real Codex account, including
 the three things that will bite you (no clock, no timeout, and `xargs -P`
 silently scrambling parallel answers).
 
+## Attachments
+
+`-a` takes a file, and repeats:
+
+```
+$ ask -a chart.png "what is the trend?"
+$ ask -a q3.pdf -a q4.pdf "what changed between these quarters?"
+$ screencapture -x -t png - | ask "what is on my screen?"
+```
+
+What a file *is* comes from reading it, never from its name. Bytes with a
+known signature are that type; anything else that is valid UTF-8 without
+NULs is text; anything else is refused by name before it is sent. So a
+`.png` holding a shell script is a shell script, and `-a main.go` is `cat
+main.go` with a label — text inlines, so the log stays greppable.
+
+| provider | carries |
+| --- | --- |
+| anthropic | images, PDF |
+| openai, openai-codex | images, PDF |
+| gemini | images, audio, video, PDF |
+| openrouter | images, PDF, WAV, MP3 |
+
+Anything a provider can't carry is refused *before* the session log is
+touched, naming the provider and what it does take — a message that could
+never be sent must not become an event that every later fold rebuilds.
+
+The bytes live in the log. A photo makes a large record; in exchange the
+session stays one self-contained file that still replays exactly, and
+copying it copies everything it means. Limits are fixed at 16 attachments,
+16 MB each, 32 MB per message. Session files are mode 0600.
+
 ## The Unix contract
 
 | stream | carries |

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"iter"
@@ -126,6 +127,14 @@ func anthropicParams(req Request) (anthropic.MessageNewParams, error) {
 				if b.Provider == "anthropic" {
 					blocks = append(blocks, anthropic.NewThinkingBlock(b.Signature, b.Text))
 				} // foreign reasoning cannot be replayed; drop it
+			case Media:
+				data := base64.StdEncoding.EncodeToString(b.Data)
+				if b.MediaType == "application/pdf" {
+					blocks = append(blocks, anthropic.NewDocumentBlock(
+						anthropic.Base64PDFSourceParam{Data: data}))
+					break
+				}
+				blocks = append(blocks, anthropic.NewImageBlockBase64(b.MediaType, data))
 			case Opaque:
 				if b.Provider == "anthropic" {
 					var data string
