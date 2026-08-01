@@ -351,10 +351,10 @@ goes to stderr.
 
 ## What it deliberately is not
 
-`ask` is the conversational core of [mu](https://github.com/patrickyoung/mu),
-a file-based agent, carved out as a filter. What was left behind was left
-behind on purpose: no tools, no agent loop, no verifier, no workspace, no
-skills, no config file, no REPL, no daemon, no MCP.
+`ask` is the conversational core of mu, a file-based agent of mine that is
+not public, carved out as a filter. What was left behind was left behind on
+purpose: no tools, no agent loop, no verifier, no workspace, no skills, no
+config file, no REPL, no daemon, no MCP.
 
 The pieces that came across are the ones that were hard to get right: the
 provider adapters and their reasoning round-trips, the stream contract
