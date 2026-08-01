@@ -174,8 +174,8 @@ prove what the machine looked like when the finding was made.
 
 ### Seeing
 
-`-a` attaches a file; binary on stdin is an attachment too. Measured live
-against Codex:
+`-a` attaches a file and repeats; binary arriving on stdin attaches itself.
+Measured live against Codex:
 
 ```bash
 $ screencapture -x -t png /tmp/shot.png       # 858 KB, 2560x1440
@@ -193,17 +193,6 @@ too, because binary stdin is sniffed:
 screencapture -x -t png - | ask "what is on my screen?"
 ```
 
-PDFs work the same way, and this is where it earns its keep — a document
-you would otherwise have to open and read:
-
-```bash
-$ cupsfilter q.txt > q.pdf
-$ ask -a q.pdf "What is the single biggest risk named in this document?"
-
-The biggest risk is customer concentration, with one customer accounting
-for 38% of revenue.
-```
-
 A file's type comes from its bytes, never its name, so `-a main.go` inlines
 as text (and the log stays greppable) while `-a shot.png` attaches. What a
 provider cannot carry is refused *before* anything is logged:
@@ -215,6 +204,148 @@ ask: /tmp/clip.wav: openai-codex does not accept audio/wav
 ```
 
 For audio and video, point `-m` at Gemini, which carries both.
+
+---
+
+## Six things that are newly possible
+
+Every command below was run while writing this, against three generated
+quarterly-report PDFs with known contents, so each answer is checkable.
+
+### 1. Documents into one conversation, then a question none of them answers
+
+The accumulation trick from earlier, now with attachments. Three separate
+processes, three PDFs, one conversation:
+
+```bash
+ask -n -q "I will send one quarterly board report per message. After each,
+           reply with only the quarter and revenue. Wait for my question."
+for q in q1 q2 q3; do ask -q -a $q.pdf "Next report."; done
+
+ask -q 'Across all three quarters, name the single trend that most
+        threatens this company, with the numbers that show it. Then state
+        what you would ask the CEO. Under 60 words.'
+```
+
+```
+The biggest threat is cash deterioration: monthly burn rose from $410K to
+$505K to $640K, while runway fell from 19 to 15 to 11 months, despite
+revenue barely growing from $3.55M to $3.61M in Q3. Ask the CEO: What
+immediate plan will extend runway before fundraising becomes unavoidable?
+```
+
+It tracked three numbers across three documents that were never in context
+together until the last turn. No single file contains that answer.
+
+### 2. A folder of PDFs becomes a CSV
+
+Parallel, and keyed by index so nothing scrambles (see the gotcha above):
+
+```bash
+mkdir -p out; i=0
+for f in *.pdf; do
+  i=$((i+1))
+  ( ask -n -q -a "$f" 'Return ONE line of CSV, no header, no fence:
+quarter,revenue_musd,margin_pct,churn_pct,burn_kusd,runway_months' \
+      > "out/$(printf '%03d' $i)" ) &
+done
+wait
+{ echo "quarter,revenue_musd,margin_pct,churn_pct,burn_kusd,runway_months"
+  cat out/*; } > report.csv
+```
+
+```
+quarter  revenue_musd  margin_pct  churn_pct  burn_kusd  runway_months
+Q1 2026  3.10          61          4.2        410        19
+Q2 2026  3.55          63          5.1        505        15
+Q3 2026  3.61          58          7.4        640        11
+```
+
+Every value correct, in order. It is real data, so the shell can do
+arithmetic on what was in a PDF a moment ago:
+
+```bash
+$ tail -n +2 report.csv | awk -F, 'END {print "runway fell", 19-$6, "months"}'
+runway fell 8 months
+```
+
+### 3. A picture of a page becomes JSON, and JSON decides
+
+No OCR is installed on this machine. There does not need to be.
+
+```bash
+$ qlmanage -t -s 1400 -o . q3.pdf          # render the page to a PNG
+$ ask -a q3.pdf.png 'Read this page image. Return ONLY minified JSON:
+  {"quarter":"","revenue_musd":0,"churn_pct":0,"runway_months":0,
+   "risk":"<12 words>"}' > shot.json
+
+$ jq -r .runway_months shot.json
+11
+$ grep -o 'Runway: [0-9]* months' q3.txt     # ground truth
+Runway: 11 months
+
+$ [ "$(jq -r .runway_months shot.json)" -lt 12 ] && echo "escalate"
+escalate
+```
+
+Pixels in, a shell branch out. That is the whole pattern: `ask` never acts —
+it turns something unreadable into something `jq` can test.
+
+### 4. Two images, and what changed between them
+
+```bash
+$ ask -a q1.png -a q3.png 'These are the same report two quarters apart,
+    in order. List ONLY the metrics that moved, one per line, as:
+    metric: before -> after (direction).'
+
+Revenue: $3.10M -> $3.61M (up)
+Gross margin: 61% -> 58% (down)
+Net new logos: 14 -> 6 (down)
+Churn: 4.2% -> 7.4% (up)
+Headcount: 41 -> 52 (up)
+Burn: $410K/mo -> $640K/mo (up)
+Runway: 19 months -> 11 months (down)
+```
+
+Every row correct, and in the order given — which is why `-a` order is
+preserved rather than sorted. Point it at two screenshots of a UI instead
+and it is a visual regression check.
+
+### 5. Ask about part of the screen
+
+`screencapture` takes a region, so you never have to send the whole display:
+
+```bash
+screencapture -x -R0,0,900,300 -t png /tmp/region.png
+ask -a /tmp/region.png "what kind of content is this?"
+```
+
+`-i` instead of `-R` lets you drag the region with the mouse.
+
+### 6. The clipboard, which is the one you will actually use
+
+Press ⌃⇧⌘4, drag a box round anything on screen — an error dialog, a chart
+in someone's slide deck, a stack trace in a screenshot someone sent you —
+then:
+
+```bash
+askclip "what is this error and how do I fix it?"
+```
+
+```bash
+askclip() {
+  local f=$(mktemp -t askclip).png
+  osascript -e "set f to (open for access POSIX file \"$f\" with write permission)" \
+            -e 'write (the clipboard as «class PNGf») to f' \
+            -e 'close access f' 2>/dev/null \
+    || { echo "no image on the clipboard" >&2; return 1; }
+  ask -a "$f" "$@"; local r=$?; rm -f "$f"; return $r
+}
+```
+
+Verified both ways: with a screenshot on the clipboard it answers; with text
+on the clipboard it says `no image on the clipboard` and exits 1, so a
+script can tell.
 
 ---
 

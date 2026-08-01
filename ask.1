@@ -376,6 +376,52 @@ Extend the default system prompt instead of replacing it:
 ask \-S "$(ask system; cat house\-style.md)" "draft the release note"
 .EE
 .PP
+Ask about what is on the screen, all of it or a region:
+.PP
+.EX
+screencapture \-x \-t png \- \(bv ask "what is on my screen?"
+screencapture \-x \-R0,0,900,300 \-t png /tmp/r.png
+ask \-a /tmp/r.png "what is this showing?"
+.EE
+.PP
+Turn a picture of a page into something
+.BR jq (1)
+can test, with no OCR installed:
+.PP
+.EX
+qlmanage \-t \-s 1400 \-o . report.pdf
+ask \-a report.pdf.png 'Return ONLY minified JSON: {"runway_months":0}' > r.json
+test "$(jq \-r .runway_months r.json)" \-lt 12 && echo escalate
+.EE
+.PP
+Compare two images \(em two quarters of a report, or two screenshots of a
+user interface:
+.PP
+.EX
+ask \-a before.png \-a after.png "List only what changed, one per line."
+.EE
+.PP
+Extract a folder of documents into one CSV, in parallel, keyed by index so
+completion order cannot scramble the rows:
+.PP
+.EX
+mkdir \-p out; i=0
+for f in *.pdf; do
+  i=$((i+1))
+  ( ask \-n \-q \-a "$f" 'ONE line of CSV, no header: quarter,revenue,runway' \e
+      > "out/$(printf '%03d' $i)" ) &
+done
+wait; cat out/*
+.EE
+.PP
+Read several documents into one conversation, then ask something no single
+one of them answers:
+.PP
+.EX
+for q in q1 q2 q3; do ask \-q \-a $q.pdf "Next report."; done
+ask \-q "Across all three, name the trend that most threatens this company."
+.EE
+.PP
 Branch a script on the outcome:
 .PP
 .EX

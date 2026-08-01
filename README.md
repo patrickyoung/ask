@@ -84,6 +84,47 @@ session stays one self-contained file that still replays exactly, and
 copying it copies everything it means. Limits are fixed at 16 attachments,
 16 MB each, 32 MB per message. Session files are mode 0600.
 
+Three things this makes possible, all run against PDFs with known contents:
+
+```bash
+# a picture of a page becomes JSON, and JSON decides. No OCR installed.
+qlmanage -t -s 1400 -o . report.pdf
+ask -a report.pdf.png 'Return ONLY minified JSON: {"runway_months":0}' > r.json
+[ "$(jq -r .runway_months r.json)" -lt 12 ] && echo escalate
+
+# two images, and what changed — point it at UI screenshots for a
+# visual regression check
+ask -a q1.png -a q3.png 'Same report, two quarters apart, in order.
+  List ONLY the metrics that moved: metric: before -> after (direction).'
+
+# documents accumulate across processes, like everything else
+for q in q1 q2 q3; do ask -q -a $q.pdf "Next report."; done
+ask -q 'Across all three, name the trend that most threatens this company.'
+#> burn rose $410K -> $505K -> $640K while runway fell 19 -> 15 -> 11 months
+```
+
+That last one is the combination worth understanding: attachments ride the
+same accumulating conversation everything else does, so three documents
+that were never in context together can still be compared in one question.
+
+The one you will actually use is the clipboard. Press ⌃⇧⌘4, drag a box
+round an error dialog or a chart in someone's slide deck, then:
+
+```bash
+askclip() {
+  local f=$(mktemp -t askclip).png
+  osascript -e "set f to (open for access POSIX file \"$f\" with write permission)" \
+            -e 'write (the clipboard as «class PNGf») to f' \
+            -e 'close access f' 2>/dev/null \
+    || { echo "no image on the clipboard" >&2; return 1; }
+  ask -a "$f" "$@"; local r=$?; rm -f "$f"; return $r
+}
+
+askclip "what is this error and how do I fix it?"
+```
+
+[GUIDE.md](GUIDE.md) has all six worked through with their real output.
+
 ## The Unix contract
 
 | stream | carries |
