@@ -3,6 +3,7 @@ package event
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -156,7 +157,7 @@ func TestLogRoundTrip(t *testing.T) {
 	if _, err := log.Append(User, UserData{Text: "hi"}); err != nil {
 		t.Fatal(err)
 	}
-	SetCurrent(log)
+	SetCurrent(dir, log)
 	if err := log.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -196,6 +197,44 @@ func TestLogRoundTrip(t *testing.T) {
 	}
 	if e.Seq != 3 {
 		t.Errorf("seq after reopen = %d, want 3", e.Seq)
+	}
+}
+
+// TestSetCurrentStaysHome: `current` names the session a bare `ask`
+// continues, and a bare `ask` reads the conversation directory. A session
+// somewhere else — `ask -f ./thread.jsonl` in a working tree — is not that
+// session, so pointing at it would be a false claim, and writing the
+// symlink would leave a file in a directory `ask` was only visiting.
+func TestSetCurrentStaysHome(t *testing.T) {
+	home, away := t.TempDir(), t.TempDir()
+
+	outside, err := CreateFile(filepath.Join(away, "thread.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outside.Close()
+	SetCurrent(home, outside)
+	if _, err := os.Lstat(filepath.Join(away, "current")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a session outside the conversation directory left a current symlink beside it")
+	}
+	if _, err := os.Lstat(filepath.Join(home, "current")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a session outside the conversation directory was made current")
+	}
+
+	// A -f path that happens to name a file in the conversation directory
+	// is still the conversation, and still becomes current.
+	inside, err := CreateFile(filepath.Join(home, "chosen.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inside.Close()
+	SetCurrent(home, inside)
+	got, err := Latest(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != inside.Path() {
+		t.Errorf("Latest = %s, want %s", got, inside.Path())
 	}
 }
 

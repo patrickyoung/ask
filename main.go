@@ -293,7 +293,10 @@ func cmdAsk(args []string) int {
 		}
 		defer log.Close()
 	}
-	event.SetCurrent(log)
+	// Only a session in the conversation directory becomes `current`: -f
+	// names a thread of the caller's own, and a bare `ask` was never going
+	// to continue it. See event.SetCurrent.
+	event.SetCurrent(*dir, log)
 
 	c := &chat.Chat{
 		Provider: prov, Model: model, System: system(*sys, sysSet),
