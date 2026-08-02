@@ -174,6 +174,41 @@ $ ask -f review.jsonl "now summarize the risks"
 $ ask replay -check review.jsonl
 ```
 
+A conversation that fills the window is exit 2, and stays exit 2 forever —
+that is the whole point of giving it its own status. `ask compact` is the
+way on:
+
+```
+$ ask "and what about the third case?"
+ask: context window is full
+$ ask compact
+ask: summarizing 33853 bytes with anthropic/claude-sonnet-5
+ask: compacted 20260801-190338-c0aacdcb → 20260802-002839-86d69eae (note by
+     20260802-002816-a7661b95, 3220 bytes from 33853)
+~/.ask/sessions/20260802-002839-86d69eae.jsonl
+$ ask "and what about the third case?"     # continues, in the new one
+```
+
+A model writes a handoff note and a fresh session starts from it. Three
+files, three roles: the source is **never touched**; the summarizer runs in
+a session of its own, so the call that wrote the note replays like any
+other; and the new session holds the note as its first message, stamped
+`source: "summary"`, with its `parent` and its `summary` session named in
+the header. All three replay on their own.
+
+That stamping is the price of admission. Model-written text entering a
+conversation is exactly the kind of thing that should never happen quietly,
+so it happens under a verb you typed, and a reader — or a program — can
+always tell which message nobody actually said.
+
+Branching a conversation verbatim needs no verb at all. A session is a
+self-contained file and `-f` names one, so `cp` is fork:
+
+```
+$ cp ~/.ask/sessions/$id.jsonl ./what-if.jsonl
+$ ask -f what-if.jsonl "suppose we had used a ring buffer instead"
+```
+
 Sessions live in `~/.ask/sessions/` (or `$ASK_DIR`), with a `current`
 symlink naming the one a bare `ask` continues. One writer at a time: a
 second is refused, because two processes appending to one log would
@@ -329,6 +364,7 @@ for f in ~/.ask/sessions/*.jsonl; do ask replay -check "$f" >/dev/null || echo "
 ```
 ask [flags] [message ...]       ask; piped stdin composes with the message
 ask replay [flags] [session]    re-render a session (-check verifies replay)
+ask compact [flags] [session]   continue a full conversation in a fresh one
 ask system                      print the default system prompt
 ask login openai-codex [flags]  store subscription auth (-from-codex)
 ask logout <provider>           remove stored credentials

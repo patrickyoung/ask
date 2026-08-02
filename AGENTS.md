@@ -29,6 +29,16 @@ When changing `ask`:
   steps that are not one operation, and pids are recycled;
 - fail before creating a session file. A bad invocation must leave no
   litter;
+
+- **model-written text in a conversation is stamped, or it does not go in.**
+  `ask compact` is the one thing that puts words in a conversation that
+  nobody said, and it is admissible only because every part of it is
+  attributable: the note is a `user` event with `source: "summary"`, its
+  header names the `parent` it came from and the `summary` session the note
+  was written in, and that session replays like any other. Compaction is
+  never automatic, never silent, and never edits the source — three files,
+  and all three prove. Anything that would put unattributed text into a fold
+  is the thing this rule exists to refuse;
 - never truncate input silently. Too much on stdin, too large an
   attachment, too many of them: each is an error naming the limit. An
   answer about the first part of a file, presented as an answer about the
@@ -50,5 +60,14 @@ When changing `ask`:
 
 Things left out on purpose. Do not add them back without asking: tools, an
 agent loop, a verifier, a workspace, skills, prompt templates, a config
-file, a REPL, a daemon, MCP, and any second mechanism for getting text into
-a conversation besides argv and stdin.
+file, a REPL, a daemon, and MCP.
+
+Text enters a conversation from argv and stdin. `ask compact` is the single
+exception, added deliberately because exit 2 was otherwise a dead end, and
+it is bounded by the rule above: the note is stamped, its provenance is in
+the header, and the call that wrote it is a session you can read. A second
+exception needs the same three properties or it is not one.
+
+Branching a session verbatim is `cp`, and that is why there is no `fork`
+verb: a session is a self-contained file and `-f` names one. A verb that
+copies a file would be a verb that copies a file.

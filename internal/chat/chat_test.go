@@ -292,6 +292,34 @@ func TestAnswerExcludesReasoning(t *testing.T) {
 	}
 }
 
+// TestAnswerSeparatesTextBlocks: a reasoning model returns several text
+// blocks with thinking between them, and they are separate messages rather
+// than fragments of one. Joined with nothing, the last line of each welds
+// to the first line of the next — here a closing fence and the next
+// opening one become ``````sh, which is neither, and a program reading the
+// answer cannot get the structure back.
+func TestAnswerSeparatesTextBlocks(t *testing.T) {
+	c, _, _ := newChat(t, provider.ReplayTurn{
+		Blocks: []provider.Block{
+			{Type: provider.Reasoning, Text: "first", Signature: "s", Provider: "anthropic"},
+			{Type: provider.Text, Text: "```sh\nls\n```"},
+			{Type: provider.Reasoning, Text: "second", Signature: "s", Provider: "anthropic"},
+			{Type: provider.Text, Text: "```sh\npwd\n```"},
+		},
+		Stop: "end",
+	})
+	answer, err := c.Say(context.Background(), say("two blocks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(answer, "``````") {
+		t.Errorf("adjacent fences welded together:\n%s", answer)
+	}
+	if want := "```sh\nls\n```\n\n```sh\npwd\n```"; answer != want {
+		t.Errorf("answer = %q, want %q", answer, want)
+	}
+}
+
 // TestDeltasReachTheDisplay: what streams to the human is what lands in
 // the log, which is the contract every adapter is held to.
 func TestDeltasReachTheDisplay(t *testing.T) {

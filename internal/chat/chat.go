@@ -212,12 +212,20 @@ func (c *Chat) once(ctx context.Context, req provider.Request) (event.Turn, erro
 // answer is the turn's text: what goes to stdout. Reasoning is not part of
 // it — it streamed to stderr for the human and stays in the log for the
 // record, but a filter's output is the answer alone.
+//
+// Text blocks are separate messages, not fragments of one, and a reasoning
+// model interleaves several with its thinking. Joining them with nothing
+// welds the last line of each to the first line of the next: a sentence
+// runs into a heading, a list item into the next list, and a closing ```
+// into the following ```lang to make ``````lang, which no markdown reader
+// and no program parsing the answer can recover. A blank line is what
+// separates two blocks of markdown, so that is the join.
 func answer(blocks []provider.Block) string {
-	var b strings.Builder
+	var texts []string
 	for _, bl := range blocks {
-		if bl.Type == provider.Text {
-			b.WriteString(bl.Text)
+		if bl.Type == provider.Text && strings.TrimSpace(bl.Text) != "" {
+			texts = append(texts, strings.Trim(bl.Text, "\n"))
 		}
 	}
-	return strings.TrimSpace(b.String())
+	return strings.TrimSpace(strings.Join(texts, "\n\n"))
 }

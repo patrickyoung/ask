@@ -36,6 +36,7 @@ const usageText = `ask — put a question through a language model, get the answ
 
   ask [flags] [message ...]       ask; -a attaches files, stdin composes
   ask replay [flags] [session]    re-render a session (-check verifies replay)
+  ask compact [flags] [session]   continue a full conversation in a fresh one
   ask system                      print the default system prompt
   ask login openai-codex [flags]  store subscription auth (-from-codex)
   ask logout <provider>           remove stored credentials
@@ -51,6 +52,9 @@ one: git diff | ask "write a commit message".
 
 conversation: each run continues the current session, so ask remembers what
 was said. -n starts a fresh one, -f keeps a thread in a file of your own.
+A session that fills the window is exit 2 and stays exit 2; ask compact
+starts a fresh one from a model-written handoff note, so the work survives
+the window. Branching verbatim needs no verb: cp the file.
 
 attachments: -a takes a file and repeats. What a file is decided by reading
 it, never by its name: text is inlined, images, PDFs, audio and video ride
@@ -73,6 +77,14 @@ flags:
   -max-tokens n max output tokens (default 16384)
   -json         emit the raw event stream on stdout instead of the answer
   -q            no progress on stderr
+compact only:
+  -m spec       summarizer provider/model (default: the session's own)
+  -d dir        conversation directory ($ASK_DIR)
+  -q            no progress on stderr
+                The note lands as the first message of a new session,
+                stamped source=summary, with the parent and the
+                summarizer's own session named in the header. The source
+                is never touched. stdout is the new session's path.
 replay only:
   -check        verify the replay invariant and exit
   -step n       print the exact provider request logged at this seq
@@ -111,6 +123,8 @@ func run(args []string) int {
 			return cmdReplay(args[1:])
 		case "system":
 			return cmdSystem(args[1:])
+		case "compact":
+			return cmdCompact(args[1:])
 		case "login":
 			return cmdLogin(args[1:])
 		case "logout":
@@ -134,7 +148,7 @@ func run(args []string) int {
 }
 
 // verbs is ask's command set, named once for the typo guard.
-var verbs = []string{"replay", "system", "login", "logout", "auth", "version", "help"}
+var verbs = []string{"replay", "compact", "system", "login", "logout", "auth", "version", "help"}
 
 // nearVerb returns the command a bare first word was probably meant to be,
 // or "" if it was probably just a message. Asking is the default action and
