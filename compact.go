@@ -197,6 +197,17 @@ func transcript(events []event.Event) string {
 			if s := blocks(t.Blocks); strings.TrimSpace(s) != "" {
 				fmt.Fprintf(&b, "[answered]\n%s\n\n", s)
 			}
+		case event.Note:
+			// A note is not folded, so a model continuing the conversation
+			// never saw it — but a handoff is written for someone with no
+			// memory of the work, and "the check passed" is exactly the
+			// kind of thing they need. It goes in named, like everything
+			// else here.
+			n, err := event.As[event.NoteData](e)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(&b, "[%s]\n%s\n\n", n.Source, n.Text)
 		}
 	}
 	return b.String()

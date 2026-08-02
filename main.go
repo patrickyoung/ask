@@ -37,6 +37,7 @@ const usageText = `ask — put a question through a language model, get the answ
   ask [flags] [message ...]       ask; -a attaches files, stdin composes
   ask replay [flags] [session]    re-render a session (-check verifies replay)
   ask compact [flags] [session]   continue a full conversation in a fresh one
+  ask note -s src [flags] [text]  record something a program decided
   ask system                      print the default system prompt
   ask login openai-codex [flags]  store subscription auth (-from-codex)
   ask logout <provider>           remove stored credentials
@@ -125,6 +126,8 @@ func run(args []string) int {
 			return cmdSystem(args[1:])
 		case "compact":
 			return cmdCompact(args[1:])
+		case "note":
+			return cmdNote(args[1:])
 		case "login":
 			return cmdLogin(args[1:])
 		case "logout":
@@ -148,7 +151,7 @@ func run(args []string) int {
 }
 
 // verbs is ask's command set, named once for the typo guard.
-var verbs = []string{"replay", "compact", "system", "login", "logout", "auth", "version", "help"}
+var verbs = []string{"replay", "compact", "note", "system", "login", "logout", "auth", "version", "help"}
 
 // nearVerb returns the command a bare first word was probably meant to be,
 // or "" if it was probably just a message. Asking is the default action and

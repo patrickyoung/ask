@@ -30,6 +30,16 @@ When changing `ask`:
 - fail before creating a session file. A bad invocation must leave no
   litter;
 
+- **a note is a record, not a message.** `ask note` puts text in a session
+  without a model call, and it is not folded — so the conversation a
+  provider sees is exactly what it was without it, and every digest ever
+  written still matches. `-s` is required and there is no way around it,
+  which is what makes the verb an instance of the rule below rather than an
+  exception to it. Do not fold notes, and do not add a way to write an
+  unsigned one: the moment either happens, a session stops being able to say
+  who put a sentence in it. A failing check is a `user` message because the
+  model has to act on it; a passing one is a note, because the run is over
+  and it is addressed to a later reader;
 - **model-written text in a conversation is stamped, or it does not go in.**
   `ask compact` is the one thing that puts words in a conversation that
   nobody said, and it is admissible only because every part of it is

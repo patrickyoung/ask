@@ -14,6 +14,12 @@ ask \- put a question through a language model
 .RI [ flags ]
 .RI [ session ]
 .br
+.B ask note
+.B \-s
+.I source
+.RI [ flags ]
+.RI [ text ...]
+.br
 .B ask system
 .br
 .B ask login
@@ -115,6 +121,37 @@ self\-contained file and
 names one, so
 .BR cp (1)
 is fork.
+.TP
+.B ask note \fR\-s \fIsource\fR [\fIflags\fR] [\fItext ...\fR]
+Record something a program decided, in the session rather than only in an
+exit status. The text comes from the arguments, or from standard input when
+there are none. No model is called, so there is no request event and nothing
+new to replay.
+.IP
+.B \-s
+is required and names the program recording it. There is no way to write an
+unattributed note: text that nobody typed belongs in a session only when a
+reader and a program can both tell at a glance who put it there, which is
+the same rule that admits
+.BR compact 's
+handoff note.
+.IP
+A note is not folded. It is a record, not a message, so the conversation a
+provider sees is exactly what it was without it and every digest already
+written still matches. The distinction is worth the word: a failing check
+is a
+.B user
+message because the model has to act on it, while a passing one is
+addressed to nobody, because the run is over.
+.IP
+The verdict is why it exists.
+.BR ply (1)
+decides whether work is done by running a command, and that verdict lived
+only on stderr and in an exit code \(em so a session recorded everything
+that was tried and nothing about whether it worked, and a run that passed
+and a run that failed were the same shape.
+.BR hone (1)
+refuses to learn from a session that does not say.
 .TP
 .B ask system
 Print the default system prompt on stdout. The default is a value, not a
@@ -528,7 +565,10 @@ leaves the answer alone. Reasoning renders dimmed when stderr is a
 terminal. When stdout and stderr are the same file or terminal, the answer
 is not printed twice.
 .SH SEE ALSO
-.BR jq (1)
+.BR brief (1),
+.BR hone (1),
+.BR jq (1),
+.BR ply (1)
 .SH HISTORY
 .B ask
 is the conversational core of
