@@ -265,8 +265,17 @@ func newID() string {
 
 // SetCurrent atomically repoints dir/current at the given session file.
 // This is what a bare `ask` follows to continue a conversation, via Latest.
-func SetCurrent(l *Log) {
-	dir := filepath.Dir(l.path)
+//
+// It declines when the session does not live in dir. `current` names the
+// one session a bare `ask` continues, and a bare `ask` looks in the
+// conversation directory — so a session anywhere else is by definition not
+// it, and a symlink there would be two things at once: a claim that is
+// false, and a file dropped in a directory that is somebody's working tree.
+// A filter does not litter where it was run.
+func SetCurrent(dir string, l *Log) {
+	if filepath.Clean(dir) != filepath.Dir(l.path) {
+		return
+	}
 	// Named per process: a shared temporary name lets two concurrent runs
 	// delete each other's half-made symlink, and the rename that follows
 	// then fails for no reason worth having.
