@@ -10,6 +10,10 @@ ask \- put a question through a language model
 .RI [ flags ]
 .RI [ session ]
 .br
+.B ask compact
+.RI [ flags ]
+.RI [ session ]
+.br
 .B ask system
 .br
 .B ask login
@@ -66,6 +70,51 @@ none, the current session. A damaged log renders as far as it reads and
 exits 1;
 .B \-check
 refuses it outright, because what cannot be read cannot be proved.
+.TP
+.B ask compact \fR[\fIflags\fR] [\fIsession\fR]
+Continue a conversation that filled its window, in a fresh one.
+.IP
+A session that overflows fails identically forever, which is what exit 2
+means. The only way on is to carry less of it, and deciding what to drop is
+a judgment \(em so a model writes a handoff note, and
+.B compact
+is the explicit, logged verb that does it rather than something a harness
+does behind you.
+.IP
+Three files, three roles. The source is never touched. The summarizer runs
+in a session of its own, so the call that wrote the note replays like any
+other. The new session holds the note as its first message, stamped
+.BR source=summary ,
+with its
+.B parent
+and its
+.B summary
+session named in the header. Each of the three replays alone.
+.IP
+The new session lands beside the source.
+.B current
+moves only if the source was the current session: compacting the
+conversation you are in moves you into the compact one, and compacting some
+other file leaves you where you were. Standard output is the new session's
+path, so it can be handed straight to
+.BR \-f .
+.IP
+Reasoning is left out of the transcript. It is the largest part of a modern
+session and the least transferable \(em provider\-opaque, addressed to a
+turn that is over \(em and leaving it out is most of why a transcript fits
+where the conversation it came from did not. Attachments are named, not
+carried.
+.IP
+If the transcript does not fit either, that is exit 2 again, naming
+.BR \-m :
+compact with a wider window.
+.IP
+Branching a conversation verbatim needs no verb. A session is a
+self\-contained file and
+.B \-f
+names one, so
+.BR cp (1)
+is fork.
 .TP
 .B ask system
 Print the default system prompt on stdout. The default is a value, not a
@@ -168,6 +217,18 @@ Verify the replay invariant and exit.
 .RB ( replay )
 Print the exact provider request logged at this sequence number, with the
 conversation reconstituted from the fold its digest stands for.
+.PP
+.B compact
+takes
+.BR \-m ,
+.B \-d
+and
+.B \-q
+with their usual meanings, except that
+.B \-m
+names the model that writes the handoff note and defaults to the one the
+source session recorded, not to
+.BR $ASK_MODEL .
 .SH ATTACHMENTS
 .B \-a
 attaches a file, and repeats:

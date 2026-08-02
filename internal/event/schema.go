@@ -63,6 +63,14 @@ type Header struct {
 	SDKs    map[string]string `json:"sdks,omitempty"`
 	Model   string            `json:"model"`
 	System  string            `json:"system"`
+
+	// Provenance, written only by compaction. Parent names the
+	// conversation this one continues; Summary names the session in which
+	// a model wrote the note it starts from. Both are ids, both are
+	// omitted everywhere else, and neither is folded — a compacted session
+	// says where it came from without that changing what it sends.
+	Parent  string `json:"parent,omitempty"`
+	Summary string `json:"summary,omitempty"`
 }
 
 // UserData is one message from the user. Blocks carries it in the order it
@@ -78,6 +86,14 @@ type Header struct {
 type UserData struct {
 	Text   string           `json:"text,omitempty"`
 	Blocks []provider.Block `json:"blocks,omitempty"`
+
+	// Source names who wrote this message when it was not the person at
+	// the terminal. Empty means argv or stdin, which is every message ask
+	// has ever recorded except the note that opens a compacted session.
+	// It does not reach the provider and it is not folded: it exists so
+	// that model-written text in a conversation can always be told apart
+	// from what was actually asked, by a reader and by a program.
+	Source string `json:"source,omitempty"`
 }
 
 // Content is the message as the provider sees it. Exactly one of the two
