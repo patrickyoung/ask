@@ -250,7 +250,24 @@ assistant  the turn as it streamed, blocks and all
 retry      a provider failure that was worth waiting out
 done       how it ended: end, max_tokens, overflow, error
 abort      interrupted
+note       something a program recorded about the run
 ```
+
+A `note` is a record, not a message. It is not folded, so the conversation a
+provider sees is exactly what it was without it, and every digest already
+written still matches:
+
+```
+$ ply -check 'go test ./...' "make the tests pass"     # ply writes one
+$ ask note -s deploy "shipped as v1.4.2" -f run.jsonl  # so can you
+```
+
+`-s` is required, and that is the whole design: there is no way to write an
+unattributed note. No model is called. It exists because an outcome that
+lives only in an exit status is gone the moment the shell moves on — until
+this, a session recorded everything that was *tried* and nothing about
+whether it *worked*, so a run that passed and a run that failed were the
+same shape. That is the one thing anything learning from a log needs.
 
 `user` and `assistant` events are the conversation; folding them produces
 exactly what goes to the provider. The `request` event records everything
@@ -365,6 +382,7 @@ for f in ~/.ask/sessions/*.jsonl; do ask replay -check "$f" >/dev/null || echo "
 ask [flags] [message ...]       ask; piped stdin composes with the message
 ask replay [flags] [session]    re-render a session (-check verifies replay)
 ask compact [flags] [session]   continue a full conversation in a fresh one
+ask note -s src [flags] [text]  record something a program decided
 ask system                      print the default system prompt
 ask login openai-codex [flags]  store subscription auth (-from-codex)
 ask logout <provider>           remove stored credentials

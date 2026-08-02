@@ -34,7 +34,29 @@ const (
 const (
 	Retry Type = "retry" // RetryData
 	Abort Type = "abort" // no payload: interrupted, and the log stays usable
+	Note  Type = "note"  // NoteData: something a program recorded about the run
 )
+
+// NoteData is something a program recorded about a run, in the log rather
+// than only in an exit status. A check's verdict is the reason it exists:
+// `ply` runs a command to decide whether the work is done, and until now
+// that verdict lived on stderr and in an exit code, so a session said
+// everything about what was tried and nothing about whether it worked.
+//
+// It is not folded, and that is the distinction it turns on. A failing
+// check becomes a user message because the model has to act on it; a
+// passing check is addressed to nobody, because the run is over. It is a
+// record, not a message — so it lands here, beside Retry and Abort, and
+// the conversation Fold produces is exactly what it was before.
+//
+// Source is required and names the program that recorded it. There is no
+// way to write an unattributed note, which is the whole point: text that
+// nobody typed is admissible in a session only when a reader and a program
+// can both tell at a glance who put it there.
+type NoteData struct {
+	Source string `json:"source"`
+	Text   string `json:"text"`
+}
 
 type Event struct {
 	Seq  int             `json:"seq"`

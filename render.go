@@ -96,6 +96,12 @@ func (r *renderer) event(e event.Event) {
 		r.line(r.dim(fmt.Sprintf("ask: %s%s in / %s out / %s reasoning · %s%s",
 			note, k(r.usage.In), k(r.usage.Out), k(r.usage.Reasoning),
 			time.Since(r.start).Round(time.Millisecond), cost)))
+	case event.Note:
+		n, _ := event.As[event.NoteData](e)
+		// Named, always. A note renders as its source and its first line
+		// because the source is the part a reader needs: this is the one
+		// kind of text in a session that nobody typed.
+		r.line(r.dim("[" + n.Source + "] " + firstLine(n.Text, 120)))
 	case event.Abort:
 		r.line(r.dim("ask: interrupted"))
 	}
