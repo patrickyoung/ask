@@ -194,6 +194,47 @@ func TestOpenRouterParams(t *testing.T) {
 	}
 }
 
+func TestStructuredOutputReachesEveryAdapter(t *testing.T) {
+	r := req("anthropic")
+	r.Schema = json.RawMessage(`{"type":"object","properties":{"n":{"type":"integer"}},"required":["n"],"additionalProperties":false}`)
+
+	if p, err := anthropicParams(r); err != nil {
+		t.Fatal(err)
+	} else if s := mustJSON(t, p); !strings.Contains(s, `"output_config":{"format":{"schema":`) || !strings.Contains(s, `"type":"json_schema"`) {
+		t.Errorf("anthropic did not receive output_config.format:\n%s", s)
+	}
+
+	if s := mustJSON(t, openaiParams(r)); !strings.Contains(s, `"text":{"format":{"name":"answer"`) || !strings.Contains(s, `"strict":true`) {
+		t.Errorf("openai did not receive strict text.format:\n%s", s)
+	}
+
+	if cfg, _, err := geminiParams(r); err != nil {
+		t.Fatal(err)
+	} else if s := mustJSON(t, cfg); !strings.Contains(s, `"responseMimeType":"application/json"`) || !strings.Contains(s, `"responseJsonSchema"`) {
+		t.Errorf("gemini did not receive response JSON schema:\n%s", s)
+	}
+
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		body, _ = io.ReadAll(request.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, openrouterWire)
+	}))
+	defer srv.Close()
+	r.Model = "openai/gpt-5.6"
+	for _, err := range NewOpenRouter("k", srv.URL, nil).Stream(context.Background(), r) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := string(body)
+	for _, want := range []string{`"response_format":{"json_schema"`, `"strict":true`, `"require_parameters":true`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("openrouter request missing %s:\n%s", want, s)
+		}
+	}
+}
+
 // TestOpenRouterPromptCache pins the cache breakpoint to the wire rather
 // than to the params struct: cache_control travels as a root-level field
 // spliced in by a request option, so only the marshaled body proves it

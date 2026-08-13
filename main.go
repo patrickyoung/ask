@@ -76,6 +76,7 @@ flags:
   -effort e     reasoning effort: off, low, medium, high (default: the
                 provider's own, thinking on)
   -max-tokens n max output tokens (default 16384)
+  -schema file  constrain the answer with JSON Schema ("-" reads stdin)
   -json         emit the raw event stream on stdout instead of the answer
   -q            no progress on stderr
 compact only:
@@ -211,16 +212,17 @@ func within1(a, b string) bool {
 func cmdAsk(args []string) int {
 	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
 	var (
-		spec      = fs.String("m", os.Getenv("ASK_MODEL"), "provider/model")
-		sys       = fs.String("S", "", "system prompt (default: ask system)")
-		fresh     = fs.Bool("n", false, "start a new conversation")
-		file      = fs.String("f", "", "session log file")
-		dir       = fs.String("d", askDir(), "conversation directory")
-		effort    = fs.String("effort", "", "reasoning effort: off, low, medium, high")
-		maxTokens = fs.Int("max-tokens", 16384, "max output tokens")
-		jsonOut   = fs.Bool("json", false, "emit raw events on stdout")
-		quiet     = fs.Bool("q", false, "no progress on stderr")
-		attached  attachFlag
+		spec       = fs.String("m", os.Getenv("ASK_MODEL"), "provider/model")
+		sys        = fs.String("S", "", "system prompt (default: ask system)")
+		fresh      = fs.Bool("n", false, "start a new conversation")
+		file       = fs.String("f", "", "session log file")
+		dir        = fs.String("d", askDir(), "conversation directory")
+		effort     = fs.String("effort", "", "reasoning effort: off, low, medium, high")
+		maxTokens  = fs.Int("max-tokens", 16384, "max output tokens")
+		schemaFile = fs.String("schema", "", "JSON Schema for the answer ('-' reads stdin)")
+		jsonOut    = fs.Bool("json", false, "emit raw events on stdout")
+		quiet      = fs.Bool("q", false, "no progress on stderr")
+		attached   attachFlag
 	)
 	fs.Var(&attached, "a", "attach a file; repeat for more")
 	usage(fs, `ask [flags] [message ...]`)
@@ -237,6 +239,14 @@ func cmdAsk(args []string) int {
 	case "", "off", "low", "medium", "high":
 	default:
 		return fail(fmt.Errorf("-effort must be off, low, medium, or high, got %q", *effort))
+	}
+	var outputSchema *structuredOutput
+	if *schemaFile != "" {
+		var err error
+		outputSchema, err = loadSchema(*schemaFile)
+		if err != nil {
+			return fail(err)
+		}
 	}
 
 	// Everything that can fail on configuration alone fails before a
@@ -303,7 +313,7 @@ func cmdAsk(args []string) int {
 
 	c := &chat.Chat{
 		Provider: prov, Model: model, System: system(*sys, sysSet),
-		MaxTokens: *maxTokens, Effort: *effort, Log: log,
+		MaxTokens: *maxTokens, Effort: *effort, Schema: outputSchema.requestSchema(), Log: log,
 	}
 	c.Load(events)
 
@@ -347,6 +357,14 @@ func cmdAsk(args []string) int {
 		// success: the next program in the pipe would read an empty
 		// input and have no way to tell why.
 		err = errNoText
+	}
+	if err == nil && outputSchema != nil {
+		if err = outputSchema.validate(answer); err != nil {
+			// Invalid structured data is not an answer. It remains in the
+			// append-only log, but stdout stays empty so a pipeline cannot
+			// mistake it for a successful document.
+			answer = ""
+		}
 	}
 	done(log, err)
 	return finish(*jsonOut, !*quiet, answer, err)

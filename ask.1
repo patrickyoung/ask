@@ -238,7 +238,17 @@ The default is the provider's own, with thinking on.
 .BI \-max\-tokens " n"
 Maximum output tokens for the answer. Default 16384. An answer cut off at
 this limit is reported on stderr and still exits 0 \(em it is output, just
-incomplete.
+incomplete. With
+.BR \-schema ,
+a cut off document exits 1 and stdout stays empty.
+.TP
+.BI \-schema " file"
+Constrain the answer with the self\-contained JSON Schema in
+.IR file .
+A file name of
+.B \-
+reads the schema from standard input; the question must then come from the
+arguments.
 .TP
 .B \-json
 Emit the raw event stream on stdout instead of the answer.
@@ -266,6 +276,37 @@ with their usual meanings, except that
 names the model that writes the handoff note and defaults to the one the
 source session recorded, not to
 .BR $ASK_MODEL .
+.SH STRUCTURED OUTPUT
+.B \-schema
+passes a JSON Schema through the provider's native structured\-output field.
+It does not put the schema in the system prompt or user message. The schema
+is recorded on the request event, beside the other normalized request
+fields, so
+.B replay \-step
+reconstitutes it and
+.B replay \-check
+keeps making the same assertion about the conversation.
+.PP
+After streaming, the answer is parsed and validated locally. Invalid JSON,
+a schema mismatch, a refusal, or a response cut off at the output limit is
+an error and writes no answer to stdout. The provider turn remains in the
+append\-only log, followed by a
+.B done
+event naming the error.
+With
+.BR \-json ,
+stdout still carries the requested raw event stream.
+.PP
+Schemas are at most 1 MB and must be one JSON object. Definitions may use
+fragment references within that object; external references are refused.
+These checks happen before a new session file is created. Provider support
+is model dependent: an unsupported model returns a provider error rather
+than falling back to prompt instructions. OpenRouter is restricted to
+endpoints that accept the structured\-output parameters.
+.PP
+.EX
+ask \-schema result.schema.json "extract the incident severity" < alert.txt
+.EE
 .SH ATTACHMENTS
 .B \-a
 attaches a file, and repeats:
@@ -514,7 +555,8 @@ can test, with no OCR installed:
 .PP
 .EX
 qlmanage \-t \-s 1400 \-o . report.pdf
-ask \-a report.pdf.png 'Return ONLY minified JSON: {"runway_months":0}' > r.json
+ask \-schema runway.schema.json \-a report.pdf.png \
+  'Extract the remaining runway.' > r.json
 test "$(jq \-r .runway_months r.json)" \-lt 12 && echo escalate
 .EE
 .PP

@@ -133,8 +133,11 @@ func (p *OpenRouter) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 		if !yield(Chunk{Kind: KindUsage, Usage: &u}, nil) {
 			return
 		}
-		stop := "end"
-		if choice.FinishReason == "length" {
+		stop := string(choice.FinishReason)
+		switch stop {
+		case "", "stop":
+			stop = "end"
+		case "length":
 			stop = "max_tokens"
 		}
 		yield(Chunk{Kind: KindStop, Stop: stop}, nil)
@@ -149,6 +152,19 @@ func openrouterParams(req Request) (openai.ChatCompletionNewParams, []option.Req
 	}
 	if req.Effort != "" && req.Effort != "off" {
 		opts = append(opts, option.WithJSONSet("reasoning", map[string]any{"effort": req.Effort}))
+	}
+	if len(req.Schema) > 0 {
+		opts = append(opts,
+			option.WithJSONSet("response_format", map[string]any{
+				"type": "json_schema",
+				"json_schema": map[string]any{
+					"name": "answer", "strict": true, "schema": schemaObject(req.Schema),
+				},
+			}),
+			// A model may have endpoints with different capabilities. Do not
+			// let the router silently choose one that ignores the schema.
+			option.WithJSONSet("provider.require_parameters", true),
+		)
 	}
 	// Prompt caching. An agent session re-sends its whole history every
 	// turn, so with no cache breakpoint the prefix is billed at full price

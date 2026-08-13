@@ -53,6 +53,40 @@ ask login openai-codex -from-codex
 export ASK_MODEL=openai-codex/$(awk -F'"' '/^model/{print $2}' ~/.codex/config.toml)
 ```
 
+## Structured JSON
+
+`-schema` makes JSON an API contract, not a prompt-writing exercise. Give it
+a self-contained JSON Schema and ask for the information you want:
+
+```bash
+cat > runway.schema.json <<'JSON'
+{
+  "type": "object",
+  "properties": {"runway_months": {"type": "integer"}},
+  "required": ["runway_months"],
+  "additionalProperties": false
+}
+JSON
+
+ask -schema runway.schema.json -a report.pdf.png \
+  "Extract the remaining runway." | jq -r .runway_months
+```
+
+The schema goes through each provider's native structured-output field; it
+is not copied into the system or user prompt. The completed answer is parsed
+and validated locally before `ask` exits 0. Invalid JSON, a schema mismatch,
+a refusal, or output cut off at the token limit exits 1 and leaves stdout
+without an answer, so the next program in a pipe cannot accept a broken
+document. With `-json`, stdout still carries the requested raw event stream.
+The provider turn and the schema remain in the append-only log.
+
+Schemas are limited to 1 MB and must carry their definitions in one file;
+fragment references such as `#/$defs/item` work, external references do not.
+`-schema -` reads the schema from stdin when the question is in argv. Native
+support is model-dependent; an unsupported model fails at the provider
+instead of falling back to “please output JSON” prompting. OpenRouter is told
+to route only to endpoints that accept the structured-output parameters.
+
 **[GUIDE.md](GUIDE.md)** is the field guide: what `ask` is good at, what it
 is not, and the recipes — measured against a real Codex account, including
 the three things that will bite you (no clock, no timeout, and `xargs -P`
@@ -96,9 +130,10 @@ next program in the pipe can detect. Session files are mode 0600.
 Three things this makes possible, all run against PDFs with known contents:
 
 ```bash
-# a picture of a page becomes JSON, and JSON decides. No OCR installed.
+# a picture of a page becomes validated JSON. No OCR installed.
 qlmanage -t -s 1400 -o . report.pdf
-ask -a report.pdf.png 'Return ONLY minified JSON: {"runway_months":0}' > r.json
+ask -schema runway.schema.json -a report.pdf.png \
+  'Extract the remaining runway.' > r.json
 [ "$(jq -r .runway_months r.json)" -lt 12 ] && echo escalate
 
 # two images, and what changed — point it at UI screenshots for a
@@ -358,8 +393,8 @@ events keep their normalized shape and the replay invariant is untouched.
 ## Think in shell
 
 ```bash
-# a shape, not a chat
-ask -S "$(ask system)" 'Return only JSON: {"sev":1-5,"why":"..."}' < alert.txt | jq .sev
+# a shape, not a chat (alert.schema.json defines sev and why)
+ask -schema alert.schema.json 'Classify this alert.' < alert.txt | jq .sev
 
 # fan out over files, each its own conversation
 ls *.go | xargs -P4 -I{} sh -c 'ask -n -q "review {}" < {} > {}.review'

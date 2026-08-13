@@ -130,8 +130,12 @@ func (p *OpenAI) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, error
 		if !yield(Chunk{Kind: KindUsage, Usage: &u}, nil) {
 			return
 		}
-		if final.IncompleteDetails.Reason == "max_output_tokens" {
+		switch final.IncompleteDetails.Reason {
+		case "max_output_tokens":
 			stop = "max_tokens"
+		case "":
+		default:
+			stop = final.IncompleteDetails.Reason
 		}
 		yield(Chunk{Kind: KindStop, Stop: stop}, nil)
 	}
@@ -177,6 +181,11 @@ func (p *OpenAI) params(req Request) responses.ResponseNewParams {
 			params.Reasoning.Effort = shared.ReasoningEffort(req.Effort)
 		}
 		params.Include = []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent}
+	}
+	if len(req.Schema) > 0 {
+		format := responses.ResponseFormatTextConfigParamOfJSONSchema("answer", schemaObject(req.Schema))
+		format.OfJSONSchema.Strict = openai.Bool(true)
+		params.Text.Format = format
 	}
 	var items responses.ResponseInputParam
 	for _, m := range req.Messages {

@@ -1,8 +1,9 @@
 # The ask field guide
 
-Everything here was run on macOS 26.5.2 against a real ChatGPT/Codex subscription
-(`openai-codex/gpt-5.6-sol`) while writing this guide. Numbers are measured,
-not estimated. Where something failed, it says so.
+The measurements and transcripts here came from macOS 26.5.2 and a real
+ChatGPT/Codex subscription (`openai-codex/gpt-5.6-sol`). Numbers are measured,
+not estimated. Command lines use the current interface; where something
+failed, it says so.
 
 ```
 ask login openai-codex -from-codex
@@ -62,21 +63,26 @@ Measured ceiling: **~1.2 MB of text accepted** in one call. At 6 MB the
 request never completed. There is no chunking inside `ask`; see the rolling
 digest below for corpora bigger than the window.
 
-### 2. Producing exact shapes, reliably enough to drive a shell
+### 2. Producing exact shapes that are safe to drive a shell
 
-Five independent runs of the same request:
+The shape is a JSON Schema now, not emphatic prose in the request:
 
 ```bash
-ask -n -q 'Return ONLY minified JSON, no fence: {"n":<the integer 7>,"w":"<the word seven>"}'
+cat > number.schema.json <<'JSON'
+{"type":"object","properties":{"n":{"type":"integer"},"w":{"type":"string"}},
+ "required":["n","w"],"additionalProperties":false}
+JSON
+ask -n -q -schema number.schema.json 'Give n as 7 and w as the word seven.'
 ```
 
 ```
-{"n":7,"w":"seven"}    ← 5/5 identical
+{"n":7,"w":"seven"}
 ```
 
-One-word contracts held 3/3. This is what makes `ask` safe in a pipe: you
-can `| jq` the output without defensive parsing. The default system prompt
-does the heavy lifting here — it tells the model its output is data.
+Each adapter translates the schema into its provider's native constrained
+output field. `ask` then parses and validates the finished document itself.
+Only a matching document reaches stdout with exit 0, so `| jq` no longer
+depends on a model obeying “ONLY JSON, no fence.”
 
 ### 3. Remembering across separate processes
 
@@ -121,9 +127,15 @@ netstat -an | grep -i listen | ask -q "System view: listening sockets."
 launchctl list               | ask -q "System view: launchd jobs."
 brew outdated --verbose      | ask -q "System view: outdated packages."
 
-ask -q 'Correlate everything. Output ONLY a JSON array, highest risk first:
-[{"finding":"","evidence":"which two views","severity":"high|medium|low",
-  "check":"a shell command I can run to verify"}]' > audit.json
+cat > audit.schema.json <<'JSON'
+{"type":"array","items":{"type":"object","properties":{
+ "finding":{"type":"string"},"evidence":{"type":"string"},
+ "severity":{"enum":["high","medium","low"]},"check":{"type":"string"}},
+ "required":["finding","evidence","severity","check"],
+ "additionalProperties":false}}
+JSON
+ask -q -schema audit.schema.json \
+  'Correlate everything, highest risk first.' > audit.json
 
 jq -r '.[] | "\(.severity)\t\(.finding)\t\(.check)"' audit.json |
 while IFS=$'\t' read -r sev finding check; do
@@ -275,9 +287,15 @@ No OCR is installed on this machine. There does not need to be.
 
 ```bash
 $ qlmanage -t -s 1400 -o . q3.pdf          # render the page to a PNG
-$ ask -a q3.pdf.png 'Read this page image. Return ONLY minified JSON:
-  {"quarter":"","revenue_musd":0,"churn_pct":0,"runway_months":0,
-   "risk":"<12 words>"}' > shot.json
+$ cat > shot.schema.json <<'JSON'
+{"type":"object","properties":{"quarter":{"type":"string"},
+ "revenue_musd":{"type":"number"},"churn_pct":{"type":"number"},
+ "runway_months":{"type":"integer"},"risk":{"type":"string"}},
+ "required":["quarter","revenue_musd","churn_pct","runway_months","risk"],
+ "additionalProperties":false}
+JSON
+$ ask -schema shot.schema.json -a q3.pdf.png \
+    'Extract the quarter, metrics, and principal risk.' > shot.json
 
 $ jq -r .runway_months shot.json
 11
@@ -626,6 +644,7 @@ cmd | ask "instruction"     stdin is evidence, argv is the instruction
 cmd | ask                   stdin alone is the whole question
 ask -a f.png "question"     attach a file; repeat -a for more
 cmd | ask "question"        binary on stdin attaches itself
+ask -schema s.json "task"   native structured output, locally validated
 
 -q          answer only, no progress on stderr
 -json       raw event stream on stdout instead of the answer

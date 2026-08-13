@@ -320,6 +320,39 @@ func TestAnswerSeparatesTextBlocks(t *testing.T) {
 	}
 }
 
+func TestStructuredAnswerDoesNotInsertText(t *testing.T) {
+	c, _, _ := newChat(t, provider.ReplayTurn{
+		Blocks: []provider.Block{
+			{Type: provider.Text, Text: `{"na`},
+			{Type: provider.Text, Text: `me":"Ada"}`},
+		},
+		Stop: "end",
+	})
+	c.Schema = json.RawMessage(`{"type":"object"}`)
+	answer, err := c.Say(context.Background(), say("a name"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"name":"Ada"}`; answer != want {
+		t.Errorf("answer = %q, want %q", answer, want)
+	}
+}
+
+func TestStructuredAnswerRequiresACompleteStop(t *testing.T) {
+	c, _, _ := newChat(t, provider.ReplayTurn{
+		Blocks: []provider.Block{{Type: provider.Text, Text: `{"n":7}`}},
+		Stop:   "max_tokens",
+	})
+	c.Schema = json.RawMessage(`{"type":"object"}`)
+	answer, err := c.Say(context.Background(), say("a number"))
+	if err == nil || !strings.Contains(err.Error(), "structured output stopped") {
+		t.Fatalf("answer/error = %q/%v, want no answer and a structured stop error", answer, err)
+	}
+	if answer != "" {
+		t.Errorf("cut off structured answer = %q, want empty", answer)
+	}
+}
+
 // TestDeltasReachTheDisplay: what streams to the human is what lands in
 // the log, which is the contract every adapter is held to.
 func TestDeltasReachTheDisplay(t *testing.T) {

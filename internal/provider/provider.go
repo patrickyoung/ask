@@ -8,6 +8,7 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -49,8 +50,9 @@ type Request struct {
 	// read the fields they need by name, so it is inert on the wire.
 	Digest string `json:"digest,omitempty"`
 
-	MaxTokens int    `json:"max_tokens,omitempty"`
-	Effort    string `json:"effort,omitempty"` // reasoning effort: "", "off", "low", "medium", "high"
+	MaxTokens int             `json:"max_tokens,omitempty"`
+	Effort    string          `json:"effort,omitempty"` // reasoning effort: "", "off", "low", "medium", "high"
+	Schema    json.RawMessage `json:"schema,omitempty"` // native structured output; never a prompt instruction
 
 	// Session names the conversation this call belongs to, for providers
 	// that route by it. It is not model input — nothing about the answer
@@ -59,6 +61,16 @@ type Request struct {
 	// the file's own name on every turn. Adapters that have no use for it
 	// ignore it.
 	Session string `json:"-"`
+}
+
+// schemaObject decodes a schema only at the SDK boundary. Request keeps the
+// raw JSON so logging and replay cannot turn an exact number into a float64.
+func schemaObject(raw json.RawMessage) map[string]any {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var object map[string]any
+	_ = dec.Decode(&object) // loadSchema admitted one JSON object
+	return object
 }
 
 // Logged returns the form of r that enters the session log: the messages

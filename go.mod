@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/anthropics/anthropic-sdk-go v1.57.0
 	github.com/openai/openai-go/v3 v3.41.1
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	google.golang.org/genai v1.63.0
 )
 

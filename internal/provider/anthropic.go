@@ -117,6 +117,9 @@ func anthropicParams(req Request) (anthropic.MessageNewParams, error) {
 	if req.Effort != "off" {
 		params.Thinking = anthropic.ThinkingConfigParamUnion{OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{}}
 	}
+	if len(req.Schema) > 0 {
+		params.OutputConfig.Format = anthropic.JSONOutputFormatParam{Schema: schemaObject(req.Schema)}
+	}
 	for _, m := range Merge(req.Messages) {
 		var blocks []anthropic.ContentBlockParamUnion
 		for _, b := range m.Blocks {

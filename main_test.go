@@ -62,6 +62,26 @@ data: {"type":"message_stop"}
 
 `
 
+const structuredWire = `event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"test-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"{\"n\":7}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+
 // plainJSON re-encodes a request body with HTML escaping off. Go escapes
 // <, > and & inside JSON strings by default, so a body read straight off
 // the wire spells "<stdin>" as an escape sequence; round-tripping it keeps
@@ -233,6 +253,191 @@ func TestFilterContract(t *testing.T) {
 	if last := events[len(events)-1]; last.Type != event.Done {
 		t.Errorf("last event is %s, want done", last.Type)
 	}
+}
+
+func TestStructuredOutputIsNativeValidatedAndReplayable(t *testing.T) {
+	dir, calls, bodies := fake(t, 200, structuredWire)
+	path := writeSchema(t, numberSchema)
+	code, stdout, stderr := exec(t, "", "-q", "-schema", path, "extract the number")
+	if code != 0 {
+		t.Fatalf("exit = %d: %s", code, stderr)
+	}
+	if stdout != `{"n":7}`+"\n" {
+		t.Errorf("stdout = %q, want the JSON document alone", stdout)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("provider calls = %d, want 1", calls.Load())
+	}
+	body := (*bodies)[0]
+	for _, want := range []string{`"output_config"`, `"format"`, `"type":"json_schema"`, `"additionalProperties":false`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("native structured-output request missing %s:\n%s", want, body)
+		}
+	}
+	events, err := event.ReadFile(filepath.Join(dir, sessions(t, dir)[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := event.Check(events); err != nil {
+		t.Errorf("structured session does not replay: %v", err)
+	}
+	found := false
+	for _, e := range events {
+		if e.Type != event.Request {
+			continue
+		}
+		req, err := event.As[provider.Request](e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var schema map[string]any
+		if err := json.Unmarshal(req.Schema, &schema); err != nil {
+			t.Fatal(err)
+		}
+		found = schema["type"] == "object"
+	}
+	if !found {
+		t.Error("request event did not record the output schema")
+	}
+}
+
+func TestStructuredSchemaNumberSurvivesWireAndReplay(t *testing.T) {
+	dir, _, bodies := fake(t, 200, structuredWire)
+	const exact = "9007199254740993"
+	schema := `{
+  "type": "object",
+  "properties": {
+    "n": {"type": "integer"},
+    "unused": {"const": ` + exact + `}
+  },
+  "required": ["n"]
+}`
+	code, _, stderr := exec(t, "", "-q", "-schema", writeSchema(t, schema), "extract the number")
+	if code != 0 {
+		t.Fatalf("exit = %d: %s", code, stderr)
+	}
+	if !strings.Contains((*bodies)[0], exact) {
+		t.Errorf("provider request changed exact schema number:\n%s", (*bodies)[0])
+	}
+
+	name := sessions(t, dir)[0]
+	events, err := event.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := 0
+	for _, e := range events {
+		if e.Type == event.Request {
+			step = e.Seq
+			break
+		}
+	}
+	code, stdout, stderr := exec(t, "", "replay", "-d", dir, "-step", fmt.Sprint(step), name)
+	if code != 0 {
+		t.Fatalf("replay exit = %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, exact) {
+		t.Errorf("replayed request changed exact schema number:\n%s", stdout)
+	}
+}
+
+func TestStructuredOutputFailureLeavesStdoutEmpty(t *testing.T) {
+	dir, _, _ := fake(t, 200, answerWire)
+	code, stdout, stderr := exec(t, "", "-schema", writeSchema(t, numberSchema), "extract the number")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr:\n%s", code, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("invalid structured output leaked to stdout: %q", stdout)
+	}
+	if !strings.Contains(stderr, "structured output is not valid JSON") {
+		t.Errorf("stderr does not name the failed contract:\n%s", stderr)
+	}
+	if len(sessions(t, dir)) != 1 {
+		t.Error("the failed provider turn should remain recorded")
+	}
+}
+
+func TestStructuredSchemaMismatchLeavesStdoutEmpty(t *testing.T) {
+	dir, _, _ := fake(t, 200, structuredWire)
+	schema := strings.Replace(numberSchema, `"integer"`, `"string"`, 1)
+	code, stdout, stderr := exec(t, "", "-schema", writeSchema(t, schema), "extract the number")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr:\n%s", code, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("schema mismatch leaked to stdout: %q", stdout)
+	}
+	if !strings.Contains(stderr, "structured output does not match schema") {
+		t.Errorf("stderr does not name the failed contract:\n%s", stderr)
+	}
+	if len(sessions(t, dir)) != 1 {
+		t.Error("the rejected provider turn should remain recorded")
+	}
+}
+
+func TestStructuredFailureStillEmitsRawEvents(t *testing.T) {
+	fake(t, 200, answerWire)
+	code, stdout, stderr := exec(t, "", "-q", "-json", "-schema", writeSchema(t, numberSchema), "extract the number")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stdout, `"type":"assistant"`) || !strings.Contains(stdout, `"type":"done"`) {
+		t.Errorf("raw event stream did not record the rejected turn:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "structured output is not valid JSON") {
+		t.Errorf("stderr does not name the failed contract:\n%s", stderr)
+	}
+}
+
+func TestBadSchemaFailsBeforeCreatingASession(t *testing.T) {
+	dir, calls, _ := fake(t, 200, structuredWire)
+	code, stdout, stderr := exec(t, "", "-schema", writeSchema(t, `{`), "hi")
+	if code != 1 || stdout != "" {
+		t.Fatalf("exit/stdout = %d/%q, want 1/empty", code, stdout)
+	}
+	if !strings.Contains(stderr, "schema is not valid JSON") {
+		t.Errorf("stderr = %q", stderr)
+	}
+	if calls.Load() != 0 || len(sessions(t, dir)) != 0 {
+		t.Errorf("bad schema made %d calls and %d sessions", calls.Load(), len(sessions(t, dir)))
+	}
+}
+
+func TestSchemaCanComeFromStdin(t *testing.T) {
+	_, _, bodies := fake(t, 200, structuredWire)
+	code, stdout, stderr := exec(t, numberSchema, "-q", "-schema", "-", "extract the number")
+	if code != 0 || stdout != `{"n":7}`+"\n" {
+		t.Fatalf("exit/stdout = %d/%q: %s", code, stdout, stderr)
+	}
+	if !strings.Contains((*bodies)[0], `"output_config"`) {
+		t.Error("schema read from stdin did not reach the provider")
+	}
+}
+
+func TestEmptySchemaStillMeansStructuredJSON(t *testing.T) {
+	dir, _, bodies := fake(t, 200, structuredWire)
+	code, stdout, stderr := exec(t, "", "-q", "-schema", writeSchema(t, `{}`), "return some JSON")
+	if code != 0 || stdout != `{"n":7}`+"\n" {
+		t.Fatalf("exit/stdout = %d/%q: %s", code, stdout, stderr)
+	}
+	if !strings.Contains((*bodies)[0], `"output_config"`) {
+		t.Error("empty schema was mistaken for no structured-output request")
+	}
+	events, err := event.ReadFile(filepath.Join(dir, sessions(t, dir)[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Type == event.Request {
+			req, _ := event.As[provider.Request](e)
+			if string(req.Schema) != `{}` {
+				t.Errorf("logged schema = %#v, want present empty object", req.Schema)
+			}
+			return
+		}
+	}
+	t.Error("no request event")
 }
 
 // TestSameOutSuppressesTheEcho: when stdout and stderr are the same place,
@@ -823,7 +1028,7 @@ func TestDocsCoverEveryFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	man := strings.ReplaceAll(string(raw), `\`, "")
-	for _, f := range []string{"-m", "-S", "-n", "-a", "-f", "-d", "-effort", "-max-tokens", "-json", "-q", "-check", "-step"} {
+	for _, f := range []string{"-m", "-S", "-n", "-a", "-f", "-d", "-effort", "-max-tokens", "-schema", "-json", "-q", "-check", "-step"} {
 		if !strings.Contains(usageText, f+" ") && !strings.Contains(usageText, f+"\n") {
 			t.Errorf("flag %s is missing from ask help", f)
 		}
