@@ -453,9 +453,8 @@ func TestSameOutSuppressesTheEcho(t *testing.T) {
 	}
 }
 
-// TestContinuesByDefault: the second ask carries the first exchange, and
-// says so on stderr — continuing must never be a silent surprise.
-func TestContinuesByDefault(t *testing.T) {
+// TestFreshByDefault: a filter does not inherit hidden conversation state.
+func TestFreshByDefault(t *testing.T) {
 	dir, _, bodies := fake(t, 200, answerWire)
 	if code, _, e := exec(t, "", "first question"); code != 0 {
 		t.Fatalf("exit = %d: %s", code, e)
@@ -464,14 +463,31 @@ func TestContinuesByDefault(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d: %s", code, stderr)
 	}
+	if len(sessions(t, dir)) != 2 {
+		t.Errorf("two asks created sessions %v, want two", sessions(t, dir))
+	}
+	if strings.Contains((*bodies)[1], "first question") {
+		t.Error("plain ask carried the previous conversation into a fresh request")
+	}
+	if strings.Contains(stderr, "continuing") {
+		t.Errorf("fresh ask claimed to continue a conversation:\n%s", stderr)
+	}
+}
+
+// TestContinueCurrent: -c carries the current exchange and says which
+// conversation it joined.
+func TestContinueCurrent(t *testing.T) {
+	dir, _, bodies := fake(t, 200, answerWire)
+	exec(t, "", "first question")
+	code, _, stderr := exec(t, "", "-c", "second question")
+	if code != 0 {
+		t.Fatalf("exit = %d: %s", code, stderr)
+	}
 	if len(sessions(t, dir)) != 1 {
 		t.Errorf("continuing created a second session: %v", sessions(t, dir))
 	}
-	if !strings.Contains(stderr, "1 turns so far") {
+	if !strings.Contains(stderr, "continuing") || !strings.Contains(stderr, "1 turns so far") {
 		t.Errorf("stderr does not announce the conversation being joined:\n%s", stderr)
-	}
-	if !strings.Contains(stderr, "-n starts fresh") {
-		t.Errorf("stderr does not say how to start fresh:\n%s", stderr)
 	}
 	second := (*bodies)[1]
 	for _, want := range []string{"first question", "the answer", "second question"} {
@@ -481,20 +497,36 @@ func TestContinuesByDefault(t *testing.T) {
 	}
 }
 
-// TestNewStartsFresh: -n is the escape hatch, and the old conversation is
-// left intact beside the new one.
-func TestNewStartsFresh(t *testing.T) {
-	dir, _, bodies := fake(t, 200, answerWire)
-	exec(t, "", "first question")
-	code, _, stderr := exec(t, "", "-n", "unrelated question")
-	if code != 0 {
-		t.Fatalf("exit = %d: %s", code, stderr)
+func TestContinueRequiresCurrent(t *testing.T) {
+	dir, calls, _ := fake(t, 200, answerWire)
+	code, stdout, stderr := exec(t, "", "-c", "follow up")
+	if code != 1 || !strings.Contains(stderr, "no current conversation") {
+		t.Fatalf("exit = %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
-	if n := len(sessions(t, dir)); n != 2 {
-		t.Fatalf("have %d sessions, want 2", n)
+	if calls.Load() != 0 || len(sessions(t, dir)) != 0 {
+		t.Fatal("failed continuation called the provider or created a session")
 	}
-	if strings.Contains((*bodies)[1], "first question") {
-		t.Error("-n carried the previous conversation into the new one")
+}
+
+func TestContinueAndFileAreMutuallyExclusive(t *testing.T) {
+	dir, calls, _ := fake(t, 200, answerWire)
+	code, _, stderr := exec(t, "", "-c", "-f", "thread.jsonl", "follow up")
+	if code != 1 || !strings.Contains(stderr, "cannot be used together") {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if calls.Load() != 0 || len(sessions(t, dir)) != 0 {
+		t.Fatal("bad selectors called the provider or created a session")
+	}
+}
+
+func TestRemovedNewFlagFailsLoudly(t *testing.T) {
+	dir, calls, _ := fake(t, 200, answerWire)
+	code, _, stderr := exec(t, "", "-n", "question")
+	if code != 1 || !strings.Contains(stderr, "flag provided but not defined: -n") {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if calls.Load() != 0 || len(sessions(t, dir)) != 0 {
+		t.Fatal("removed -n called the provider or created a session")
 	}
 }
 
@@ -521,6 +553,41 @@ func TestSessionFileKeepsItsOwnThread(t *testing.T) {
 	}
 	if err := event.Check(events); err != nil {
 		t.Errorf("thread does not replay: %v", err)
+	}
+}
+
+func TestSessionFileNeverChangesCurrent(t *testing.T) {
+	dir, _, _ := fake(t, 200, answerWire)
+	exec(t, "", "current question")
+	before, err := event.Current(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread := filepath.Join(dir, "named.jsonl")
+	if code, _, stderr := exec(t, "", "-f", thread, "named question"); code != 0 {
+		t.Fatalf("exit = %d: %s", code, stderr)
+	}
+	after, err := event.Current(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Errorf("-f moved current from %s to %s", before, after)
+	}
+}
+
+func TestSessionFileReportsStatErrors(t *testing.T) {
+	dir, calls, _ := fake(t, 200, answerWire)
+	parent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := exec(t, "", "-f", filepath.Join(parent, "thread.jsonl"), "question")
+	if code != 1 || !strings.Contains(stderr, "session") {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if calls.Load() != 0 || len(sessions(t, dir)) != 0 {
+		t.Fatal("bad -f path called the provider or created a session")
 	}
 }
 
@@ -592,7 +659,7 @@ func TestOverflowExitsTwo(t *testing.T) {
 	if stdout != "" {
 		t.Errorf("stdout = %q, want empty", stdout)
 	}
-	if !strings.Contains(stderr, "-n") {
+	if !strings.Contains(stderr, "without -c or -f") {
 		t.Errorf("stderr does not say how to recover:\n%s", stderr)
 	}
 }
@@ -649,8 +716,8 @@ func TestNoModelLeavesNoLitter(t *testing.T) {
 func TestReplayCheckProvesTheSession(t *testing.T) {
 	fake(t, 200, answerWire)
 	exec(t, "", "first")
-	exec(t, "", "second")
-	exec(t, "", "third")
+	exec(t, "", "-c", "second")
+	exec(t, "", "-c", "third")
 
 	code, stdout, stderr := exec(t, "", "replay", "-check")
 	if code != 0 {
@@ -967,15 +1034,14 @@ func TestHeaderRecordsProvenance(t *testing.T) {
 	}
 }
 
-// TestContinuingInheritsTheModel: `ask` twice in a row should not need -m
-// the second time.
+// TestContinuingInheritsTheModel: ask -c does not need -m again.
 func TestContinuingInheritsTheModel(t *testing.T) {
 	fake(t, 200, answerWire)
 	if code, _, e := exec(t, "", "first"); code != 0 {
 		t.Fatalf("exit = %d: %s", code, e)
 	}
 	t.Setenv("ASK_MODEL", "") // nothing on the command line either
-	code, stdout, stderr := exec(t, "", "second")
+	code, stdout, stderr := exec(t, "", "-c", "second")
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr:\n%s", code, stderr)
 	}
@@ -1029,7 +1095,7 @@ func TestDocsCoverEveryFlag(t *testing.T) {
 	}
 	man := strings.ReplaceAll(string(raw), `\`, "")
 	for _, f := range []string{
-		"-m", "-S", "-n", "-a", "-f", "-d", "-effort", "-max-tokens",
+		"-m", "-S", "-c", "-a", "-f", "-d", "-effort", "-max-tokens",
 		"-schema", "-json", "-q", "-check", "-step", "-s", "-from-codex",
 		"-access-token", "-refresh-token", "-token-url", "-client-id", "-scope", "-expires",
 	} {

@@ -1,4 +1,4 @@
-.TH ASK 1 "2026-08-12" "ask 0.1.0" "General Commands Manual"
+.TH ASK 1 "2026-08-13" "ask 0.1.0" "General Commands Manual"
 .SH NAME
 ask \- put a question through a language model
 .SH SYNOPSIS
@@ -65,11 +65,11 @@ Ask. Arguments are joined with spaces. Piped or redirected standard input
 becomes the message, or rides with one inside
 .I <stdin>
 delimiters when both are given. Surrounding whitespace on textual stdin is
-removed. By default this continues the current
-conversation; see
-.B \-n
+removed. By default this starts a new conversation; see
+.B \-c
 and
-.BR \-f .
+.BR \-f
+for explicit continuation.
 .TP
 .B ask replay \fR[\fIflags\fR] [\fIsession\fR]
 Re\-render a session. The argument is a path or a bare session id; with
@@ -194,14 +194,18 @@ An explicitly empty
 sends no system prompt at all. The choice is made for each invocation; a
 prompt passed when a session was created is not inherited by later calls.
 .TP
-.B \-n
-Start a new conversation instead of continuing the current one.
+.B \-c
+Continue the session named by the conversation directory's
+.I current
+symlink. A missing or dangling pointer is an error; no other session is
+chosen as a fallback. This cannot be combined with
+.BR \-f .
 .TP
 .BI \-f " file"
 Read and append to this session log, keeping a thread wherever the caller
-wants it. An existing file is continued; a new one is created. This never
-consults the conversation directory's current pointer. A file outside the
-conversation directory does not change that pointer.
+wants it. An existing file is continued; a nonexistent file is created.
+Other errors inspecting the path are reported. This never consults or
+changes the conversation directory's current pointer.
 .TP
 .BI \-d " dir"
 Conversation directory. Defaults to
@@ -377,7 +381,7 @@ Binary arriving on standard input is an attachment too, so no flag is
 needed for the common case:
 .PP
 .EX
-screencapture \-x \-t png \- \(bv ask \-n "what is on my screen?"
+screencapture \-x \-t png \- \(bv ask "what is on my screen?"
 .EE
 .PP
 Text on standard input keeps its old meaning and rides inside the message
@@ -422,17 +426,19 @@ sortable id. The
 .I current
 symlink names the session a bare
 .B ask
-continues. A session selected with
+most recently started. It is followed only when
+.B \-c
+is explicit. A session selected with
 .B \-f
-does not change
-.I current
-unless the file itself is in the conversation directory.
+never changes
+.IR current .
 .PP
-Because continuing is the default, a pipeline inherits whatever was asked
-before it. When that matters, use
-.B \-n
-or give the thread its own file with
-.BR \-f .
+Because a plain invocation starts fresh, independent pipelines do not inherit
+conversation state. Use
+.B \-c
+for the current conversation or
+.B \-f
+for a named thread.
 Every run that continues a session announces which one it joined and how
 many turns it already holds, unless
 .B \-q
@@ -564,8 +570,10 @@ JSON, a schema mismatch, a refusal, or an incomplete stop.
 The context window is full. This is permanent for that conversation \(em
 the same request will fail identically forever \(em so it is told apart
 from an ordinary error, and a retry loop can stop instead of grinding.
-Start a new conversation with
-.BR \-n .
+Start a new conversation by omitting
+.B \-c
+and
+.BR \-f .
 .TP
 .B 130
 Interrupted. Any blocks already streamed are logged as a partial turn and
@@ -583,15 +591,15 @@ ask what is a monad
 Use a pipe as the data and the argument as the instruction:
 .PP
 .EX
-git diff \(bv ask \-n "write a commit message"
+git diff \(bv ask "write a commit message"
 .EE
 .PP
 Continue one conversation, then start another:
 .PP
 .EX
 ask "what is a monad"
-ask "give me an example in Go"
-ask \-n "unrelated question"
+ask \-c "give me an example in Go"
+ask "unrelated question"
 .EE
 .PP
 Keep a named thread and verify it later:
@@ -605,14 +613,14 @@ ask replay \-check review.jsonl
 Require JSON that another program can test:
 .PP
 .EX
-ask \-n \-schema decision.schema.json "classify this alert" < alert.txt \
+ask \-schema decision.schema.json "classify this alert" < alert.txt \
   \(bv jq \-e '.urgent'
 .EE
 .PP
 Attach two files in order:
 .PP
 .EX
-ask \-n \-a before.png \-a after.png "list what changed"
+ask \-a before.png \-a after.png "list what changed"
 .EE
 .PP
 Add an attributed record without calling a model:
@@ -631,7 +639,7 @@ ask \-f "$new" "continue with the next case"
 Branch on the answer, not merely on exit 0:
 .PP
 .EX
-if ask \-n \-q "does this log show an OOM? answer yes or no" < kern.log \
+if ask \-q "does this log show an OOM? answer yes or no" < kern.log \
   \(bv grep \-Eiq '^yes$'; then echo OOM; fi
 .EE
 .PP

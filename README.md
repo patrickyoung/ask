@@ -5,8 +5,8 @@ standard output.
 
 ```sh
 ask 'What does this error mean?' < build.log
-git diff | ask -n 'Write a commit message.'
-ask -n -a chart.png 'What changed?'
+git diff | ask 'Write a commit message.'
+ask -a chart.png 'What changed?'
 ```
 
 It is a Unix filter:
@@ -22,6 +22,9 @@ It is a Unix filter:
 
 `-q` suppresses progress, not errors. `-json` replaces the normal answer with
 the raw events written by that invocation.
+
+Each plain `ask` starts a fresh conversation. Use `-c` only when the new
+question should include the current conversation.
 
 ## Install
 
@@ -60,7 +63,7 @@ Arguments form the instruction. Standard input supplies the data:
 
 ```sh
 ask 'Explain mutexes in one paragraph.'
-go test ./... 2>&1 | ask -n 'Find the first useful failure.'
+go test ./... 2>&1 | ask 'Find the first useful failure.'
 ```
 
 With both, `ask` sends the argument text followed by stdin inside `<stdin>`
@@ -79,32 +82,34 @@ produce the input, or attach the file.
 
 ## Conversations
 
-A plain invocation continues the current conversation:
+A plain invocation starts a new conversation:
 
 ```sh
 ask 'What is a monad?'
-ask 'Show one Go example.'       # continues
-ask -n 'Start an unrelated task.'
+ask -c 'Show one Go example.'    # continues current
+ask 'Start an unrelated task.'   # starts fresh
 ```
 
-Use `-n` for a new session. Use `-f` for an explicitly named session,
-including one outside the normal conversation directory:
+Use `-c` to continue the current session. It is an error when no current
+session exists. Use `-f` for an explicitly named session, including one
+outside the normal conversation directory:
 
 ```sh
 ask -f review.jsonl 'Review this patch.' < patch.diff
 ask -f review.jsonl 'List the remaining risks.'
 ```
 
-Sessions normally live in `~/.ask/sessions` or `$ASK_DIR`. The `current`
-symlink names the session a plain `ask` continues. A session named with `-f`
-does not change `current` unless that file itself lives in the conversation
-directory.
+Sessions normally live in `~/.ask/sessions` or `$ASK_DIR`. Each plain `ask`
+becomes `current`, and `ask -c` continues exactly that symlink. A missing or
+dangling `current` is an error; `ask` does not guess from the newest file.
+A session named with `-f` never changes `current`.
 
 Only one process may write a session at a time. The lock is an `flock(2)` on
 the session file and is released by the kernel when the process exits.
 
 If a conversation fills the context window, `ask` exits 2. Repeating the same
-request cannot fix that conversation. Start fresh with `-n`, or compact it:
+request cannot fix that conversation. Start fresh with a plain `ask`, or
+compact it:
 
 ```sh
 ask compact

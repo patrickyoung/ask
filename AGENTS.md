@@ -12,6 +12,9 @@ When changing `ask`:
 - preserve the Unix contract: stdout is the answer alone, stderr is
   progress, the exit code is the outcome. Exit 2 means the context window
   is full and nothing else — it exists so a retry loop can stop;
+- keep conversation state explicit. A plain `ask` starts fresh; `-c`
+  continues exactly `current` and fails if that pointer is unavailable;
+  `-f` continues or creates only the named file and never moves `current`;
 - never weaken the replay invariant. `event.Check` has two branches and
   both are the same assertion; a request that records neither messages nor
   a digest is a hard error, so a lost field cannot make the check

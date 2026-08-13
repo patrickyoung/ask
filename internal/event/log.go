@@ -206,16 +206,25 @@ func lastSeq(events []Event) int {
 	return events[len(events)-1].Seq
 }
 
-// Latest returns the path of dir's current session: the target of the
-// current symlink, falling back to the most recently written session file
-// (ids collide on same-second creation, mtime doesn't). It returns
-// os.ErrNotExist if there are no sessions.
+// Current returns exactly the session named by dir/current. A missing or
+// dangling pointer is an error: explicit continuation must not guess.
+func Current(dir string) (string, error) {
+	target, err := os.Readlink(filepath.Join(dir, "current"))
+	if err != nil {
+		return "", err
+	}
+	p := filepath.Join(dir, target)
+	if _, err := os.Stat(p); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
+// Latest returns Current when it exists, falling back to the most recently
+// written session file. It returns os.ErrNotExist if there are no sessions.
 func Latest(dir string) (string, error) {
-	if target, err := os.Readlink(filepath.Join(dir, "current")); err == nil {
-		p := filepath.Join(dir, target)
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
+	if p, err := Current(dir); err == nil {
+		return p, nil
 	}
 	names, err := List(dir)
 	if err != nil {
@@ -264,25 +273,27 @@ func newID() string {
 }
 
 // SetCurrent atomically repoints dir/current at the given session file.
-// This is what a bare `ask` follows to continue a conversation, via Latest.
+// This is what `ask -c` follows to continue a conversation, via Current.
 //
 // It declines when the session does not live in dir. `current` names the
-// one session a bare `ask` continues, and a bare `ask` looks in the
-// conversation directory — so a session anywhere else is by definition not
-// it, and a symlink there would be two things at once: a claim that is
-// false, and a file dropped in a directory that is somebody's working tree.
-// A filter does not litter where it was run.
-func SetCurrent(dir string, l *Log) {
+// one session `ask -c` continues, and -c looks in the conversation directory.
+func SetCurrent(dir string, l *Log) error {
 	if filepath.Clean(dir) != filepath.Dir(l.path) {
-		return
+		return nil
 	}
 	// Named per process: a shared temporary name lets two concurrent runs
 	// delete each other's half-made symlink, and the rename that follows
 	// then fails for no reason worth having.
 	tmp := filepath.Join(dir, fmt.Sprintf(".current.%d.tmp", os.Getpid()))
-	os.Remove(tmp)
-	if err := os.Symlink(filepath.Base(l.path), tmp); err != nil {
-		return // best effort; Latest falls back to newest file
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
-	os.Rename(tmp, filepath.Join(dir, "current"))
+	if err := os.Symlink(filepath.Base(l.path), tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, filepath.Join(dir, "current")); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }

@@ -14,23 +14,22 @@ runs no commands. If the model needs a fact, put that fact in the message.
 
 ## Choose the conversation first
 
-A plain `ask` continues the current conversation. That is useful at a
-terminal and usually wrong in an independent script.
+A plain `ask` starts a new conversation. Continuing is explicit.
 
 ```sh
-ask 'Explain this interface.'       # continue current
-ask 'Now give one example.'         # same conversation
-ask -n 'Review this file.' < x.go   # new conversation
+ask 'Explain this interface.'       # new conversation
+ask -c 'Now give one example.'      # continue current
+ask 'Review this file.' < x.go      # another new conversation
 ask -f audit.jsonl 'Begin audit.'   # named conversation
 ```
 
 Use these rules:
 
-- Interactive follow-up: use the default.
-- Independent script: use `-n`.
+- Interactive follow-up: use `-c`.
+- Independent script: plain `ask` is already fresh.
 - Work with a stable name: use `-f file.jsonl`.
-- Parallel work: give every process its own session with `-n` or a distinct
-  `-f` path.
+- Parallel work: plain invocations are independent; use distinct `-f` paths
+  for named threads.
 
 One session has one writer. A second writer is refused because interleaved
 turns would no longer describe one conversation.
@@ -40,9 +39,9 @@ turns would no longer describe one conversation.
 Arguments are the instruction. Text on stdin is the evidence.
 
 ```sh
-git diff | ask -n 'Write a commit message.'
-go test ./... 2>&1 | ask -n 'Explain the first useful failure.'
-ask -n 'Explain compare-and-swap in two sentences.'
+git diff | ask 'Write a commit message.'
+go test ./... 2>&1 | ask 'Explain the first useful failure.'
+ask 'Explain compare-and-swap in two sentences.'
 ```
 
 If both are present, `ask` sends the instruction followed by stdin inside
@@ -52,8 +51,8 @@ Surrounding whitespace on textual stdin is removed.
 This is also how to provide facts the model cannot know:
 
 ```sh
-date -u | ask -n 'State this time in ISO 8601.'
-uname -a | ask -n 'Explain this platform string.'
+date -u | ask 'State this time in ISO 8601.'
+uname -a | ask 'Explain this platform string.'
 ```
 
 Do not ask the model to open `/tmp/x`, inspect the current repository, or run
@@ -76,7 +75,7 @@ cat > finding.schema.json <<'JSON'
 }
 JSON
 
-ask -n -q -schema finding.schema.json \
+ask -q -schema finding.schema.json \
   'Does this log show an out-of-memory failure?' < kernel.log |
   jq -e '.found'
 ```
@@ -99,8 +98,8 @@ the schema, so put the question in argv.
 Use `-a` for a regular file:
 
 ```sh
-ask -n -a chart.png 'State the trend.'
-ask -n -a old.pdf -a new.pdf 'List the changed claims.'
+ask -a chart.png 'State the trend.'
+ask -a old.pdf -a new.pdf 'List the changed claims.'
 ```
 
 The order of `-a` flags is preserved. Type is determined from content:
@@ -112,7 +111,7 @@ The order of `-a` flags is preserved. Type is determined from content:
 Binary stdin is treated as one attachment:
 
 ```sh
-screencapture -x -t png - | ask -n 'Describe this image.'
+screencapture -x -t png - | ask 'Describe this image.'
 ```
 
 Provider families differ:
@@ -139,7 +138,7 @@ For prose:
 
 ```sh
 if git diff --staged |
-   ask -n -q 'Does this change authentication? Answer yes or no.' |
+   ask -q 'Does this change authentication? Answer yes or no.' |
    grep -Eiq '^yes$'; then
   echo 'security review required'
 fi
@@ -148,7 +147,7 @@ fi
 For automation, structured JSON is safer:
 
 ```sh
-if ask -n -q -schema finding.schema.json \
+if ask -q -schema finding.schema.json \
      'Does this change authentication?' < patch.json |
    jq -e '.found' >/dev/null; then
   echo 'security review required'
@@ -160,8 +159,8 @@ you have chosen to execute untrusted text.
 
 ## Run independent work in parallel
 
-Parallel calls must not share the current session. Output also needs a key;
-parallel processes finish out of order.
+Plain calls create independent sessions, so they can run in parallel. Output
+still needs a key because processes finish out of order.
 
 ```sh
 mkdir -p out
@@ -169,13 +168,16 @@ i=0
 for file in *.go; do
   i=$((i + 1))
   key=$(printf '%03d' "$i")
-  (ask -n -q "Review $file in five lines." < "$file" > "out/$key") &
+  (ask -q "Review $file in five lines." < "$file" > "out/$key") &
 done
 wait
 cat out/*
 ```
 
-`-n` gives each call its own session. Numbered files restore input order.
+Each plain call gets its own session. Numbered files restore input order.
+Do not run parallel `-c` calls: only one writer may hold a session.
+After parallel plain calls, which one is `current` is unspecified; name any
+thread whose identity matters with `-f`.
 
 ## Handle limits and retries
 
@@ -188,7 +190,7 @@ Exit 2 has one meaning: a model context window is full. For an ask turn, do
 not retry the same session. Either start over:
 
 ```sh
-ask -n 'Restate the task with only the needed input.'
+ask 'Restate the task with only the needed input.'
 ```
 
 or compact the session:
@@ -268,8 +270,8 @@ Copying is the exact branch operation because a session is self-contained.
 ## Reference card
 
 ```text
-ask 'question'                  continue the current conversation
-ask -n 'question'               start a new conversation
+ask 'question'                  start a new conversation
+ask -c 'question'               continue the current conversation
 ask -f thread.jsonl 'question'  use a named conversation
 command | ask 'instruction'     combine evidence and instruction
 ask -a file 'instruction'       attach a file; repeat -a as needed

@@ -49,10 +49,10 @@ Anything that is not a command is a message; -- forces a command-like word.
 
 streams: the answer is stdout. Progress and errors are stderr. Piped stdin
 is the message, or data for an instruction:
-  git diff | ask -n "write a commit message"
+  git diff | ask "write a commit message"
 
-conversation: each ask continues the current session. -n starts a fresh one;
--f keeps a thread in a file of your own.
+conversation: each ask starts a fresh session. -c continues the current one;
+-f keeps a named thread in a file of your own.
 A session that fills the window is exit 2 and stays exit 2; ask compact
 starts a fresh one from a model-written handoff note, so the work survives
 the window. Branching verbatim needs no verb: cp the file.
@@ -60,18 +60,18 @@ the window. Branching verbatim needs no verb: cp the file.
 attachments: -a takes a regular file and repeats. Content decides its type:
 text is inlined; images, PDFs, audio and video are attached. Binary stdin is
 an attachment too, so
-screencapture -x -t png - | ask -n "what is this?" needs no flag. Providers
+screencapture -x -t png - | ask "what is this?" needs no flag. Providers
 differ in what they carry, and ask says so before sending, not after.
 
 flags:
-  -m spec       provider/model. Default: $ASK_MODEL, then the continued
+  -m spec       provider/model. Default: $ASK_MODEL, then a continued
                 session's model; e.g. anthropic/your-model
   -a file       attach a file; repeat for more (16 max, 16MB each, 32MB
                 total). The bytes land in the session log, so it replays
   -S text       system prompt for this call, replacing $ASK_SYSTEM or the
                 built-in default. -S "" sends none
-  -n            start a new conversation instead of continuing
-  -f file       session log to read and append to (default: -d's current)
+  -c            continue the current conversation
+  -f file       named session; continue it if it exists, create it otherwise
   -d dir        conversation directory ($ASK_DIR, or ~/.ask/sessions)
   -effort e     reasoning effort: off, low, medium, high; provider mapping
                 varies (default: the provider's own)
@@ -223,7 +223,7 @@ func cmdAsk(args []string) int {
 	var (
 		spec       = fs.String("m", os.Getenv("ASK_MODEL"), "provider/model")
 		sys        = fs.String("S", "", "system prompt for this call")
-		fresh      = fs.Bool("n", false, "start a new conversation")
+		continuing = fs.Bool("c", false, "continue the current conversation")
 		file       = fs.String("f", "", "session log file")
 		dir        = fs.String("d", askDir(), "conversation directory")
 		effort     = fs.String("effort", "", "reasoning effort: off, low, medium, high")
@@ -237,6 +237,9 @@ func cmdAsk(args []string) int {
 	usage(fs, `ask [flags] [message ...]`)
 	if err := fs.Parse(args); err != nil {
 		return usageCode(fs, err)
+	}
+	if *continuing && *file != "" {
+		return fail(errors.New("-c and -f cannot be used together"))
 	}
 	sysSet := false
 	fs.Visit(func(f *flag.Flag) {
@@ -260,11 +263,13 @@ func cmdAsk(args []string) int {
 
 	// Everything that can fail on configuration alone fails before a
 	// session file exists, so a bad invocation leaves no litter behind.
-	path, cont := session(*dir, *file, *fresh)
+	path, cont, err := session(*dir, *file, *continuing)
+	if err != nil {
+		return fail(err)
+	}
 	var log *event.Log
 	var events []event.Event
 	if cont {
-		var err error
 		if log, events, err = event.Open(path); err != nil {
 			return fail(err)
 		}
@@ -315,11 +320,6 @@ func cmdAsk(args []string) int {
 		}
 		defer log.Close()
 	}
-	// Only a session in the conversation directory becomes `current`: -f
-	// names a thread of the caller's own, and a bare `ask` was never going
-	// to continue it. See event.SetCurrent.
-	event.SetCurrent(*dir, log)
-
 	c := &chat.Chat{
 		Provider: prov, Model: model, System: system(*sys, sysSet),
 		MaxTokens: *maxTokens, Effort: *effort, Schema: outputSchema.requestSchema(), Log: log,
@@ -334,10 +334,8 @@ func cmdAsk(args []string) int {
 		c.OnDelta = r.delta
 		views = append(views, r.event)
 		if n := c.Turns(); n > 0 {
-			// Continuing is the default, so it must never be a surprise:
-			// say which conversation this is joining, and how long it is.
 			fmt.Fprintln(os.Stderr, r.dim(fmt.Sprintf(
-				"ask: %s · %s · %d turns so far (-n starts fresh)", log.ID(), *spec, n)))
+				"ask: continuing %s · %s · %d turns so far", log.ID(), *spec, n)))
 		}
 	}
 	if *jsonOut {
@@ -355,6 +353,14 @@ func cmdAsk(args []string) int {
 	if !cont {
 		if err := header(log, *spec, c.System); err != nil {
 			return fail(err)
+		}
+		// A plain ask starts the conversation a later `ask -c` will
+		// continue. An explicit -f owns its thread and never changes this
+		// pointer.
+		if *file == "" {
+			if err := event.SetCurrent(*dir, log); err != nil {
+				return fail(err)
+			}
 		}
 	}
 
@@ -381,25 +387,25 @@ func cmdAsk(args []string) int {
 
 var errNoText = errors.New("the model returned no text")
 
-// session decides which log this run writes to. It returns the path and
-// whether that path is an existing session to continue. -f names a thread
-// of the caller's own; without it the conversation directory's `current`
-// symlink is followed, which is what makes plain `ask` remember.
-func session(dir, file string, fresh bool) (path string, cont bool) {
+// session decides which log this run writes to. Plain ask starts fresh, -c
+// continues exactly current, and -f continues or creates the named thread.
+func session(dir, file string, continuing bool) (path string, cont bool, err error) {
 	if file != "" {
-		if !fresh {
-			if _, err := os.Stat(file); err == nil {
-				return file, true
-			}
+		if _, err := os.Stat(file); err == nil {
+			return file, true, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", false, fmt.Errorf("session %s: %w", file, err)
 		}
-		return file, false
+		return file, false, nil
 	}
-	if !fresh {
-		if p, err := event.Latest(dir); err == nil {
-			return p, true
+	if continuing {
+		p, err := event.Current(dir)
+		if err != nil {
+			return "", false, fmt.Errorf("no current conversation in %s: %w", dir, err)
 		}
+		return p, true, nil
 	}
-	return "", false // event.CreateAt mints an id in dir
+	return "", false, nil // event.Create mints an id in dir
 }
 
 // askDir is where conversations live: $ASK_DIR, else ~/.ask/sessions. A
@@ -469,7 +475,7 @@ func finish(jsonOut, streamed bool, answer string, err error) int {
 		return 0
 	case errors.Is(err, chat.ErrOverflow):
 		fmt.Fprintln(os.Stderr, "ask:", err)
-		fmt.Fprintln(os.Stderr, "ask: start a new conversation with -n")
+		fmt.Fprintln(os.Stderr, "ask: start a new conversation without -c or -f")
 		return 2
 	case errors.Is(err, context.Canceled):
 		return 130

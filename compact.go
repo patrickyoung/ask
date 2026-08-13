@@ -118,7 +118,9 @@ func cmdCompact(args []string) int {
 	// one, because that is the only reason to do it. Compacting some other
 	// file leaves your current session where it was.
 	if wasCurrent(*dir, src) {
-		event.SetCurrent(*dir, log)
+		if err := event.SetCurrent(*dir, log); err != nil {
+			return fail(err)
+		}
 	}
 	if !*quiet {
 		fmt.Fprintf(os.Stderr, "ask: compacted %s → %s (note by %s, %d bytes from %d)\n",

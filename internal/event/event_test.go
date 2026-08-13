@@ -157,7 +157,9 @@ func TestLogRoundTrip(t *testing.T) {
 	if _, err := log.Append(User, UserData{Text: "hi"}); err != nil {
 		t.Fatal(err)
 	}
-	SetCurrent(dir, log)
+	if err := SetCurrent(dir, log); err != nil {
+		t.Fatal(err)
+	}
 	if err := log.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +175,14 @@ func TestLogRoundTrip(t *testing.T) {
 		t.Fatalf("read back %+v", events)
 	}
 
-	// current points at it, and Latest follows the pointer.
+	// current points at it, and both exact and fallback lookup follow it.
+	current, err := Current(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current != log.Path() {
+		t.Errorf("Current = %s, want %s", current, log.Path())
+	}
 	got, err := Latest(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -200,11 +209,9 @@ func TestLogRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSetCurrentStaysHome: `current` names the session a bare `ask`
-// continues, and a bare `ask` reads the conversation directory. A session
-// somewhere else — `ask -f ./thread.jsonl` in a working tree — is not that
-// session, so pointing at it would be a false claim, and writing the
-// symlink would leave a file in a directory `ask` was only visiting.
+// TestSetCurrentStaysHome: current names a session in the conversation
+// directory. A session elsewhere cannot be named without dropping a symlink
+// in a directory ask was only visiting.
 func TestSetCurrentStaysHome(t *testing.T) {
 	home, away := t.TempDir(), t.TempDir()
 
@@ -213,7 +220,9 @@ func TestSetCurrentStaysHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer outside.Close()
-	SetCurrent(home, outside)
+	if err := SetCurrent(home, outside); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Lstat(filepath.Join(away, "current")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a session outside the conversation directory left a current symlink beside it")
 	}
@@ -221,20 +230,42 @@ func TestSetCurrentStaysHome(t *testing.T) {
 		t.Errorf("a session outside the conversation directory was made current")
 	}
 
-	// A -f path that happens to name a file in the conversation directory
-	// is still the conversation, and still becomes current.
+	// A session in the conversation directory can become current.
 	inside, err := CreateFile(filepath.Join(home, "chosen.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer inside.Close()
-	SetCurrent(home, inside)
+	if err := SetCurrent(home, inside); err != nil {
+		t.Fatal(err)
+	}
 	got, err := Latest(home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != inside.Path() {
 		t.Errorf("Latest = %s, want %s", got, inside.Path())
+	}
+}
+
+func TestCurrentDoesNotGuess(t *testing.T) {
+	dir := t.TempDir()
+	log, err := Create(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := log.Path()
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing.jsonl", filepath.Join(dir, "current")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Current(dir); err == nil {
+		t.Fatal("Current followed a fallback instead of refusing a dangling pointer")
+	}
+	if got, err := Latest(dir); err != nil || got != path {
+		t.Fatalf("Latest = %q, %v; want fallback %q", got, err, path)
 	}
 }
 
