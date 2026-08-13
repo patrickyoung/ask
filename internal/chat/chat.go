@@ -9,6 +9,7 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -33,6 +34,7 @@ type Chat struct {
 	System    string
 	MaxTokens int
 	Effort    string
+	Schema    json.RawMessage
 
 	Log    *event.Log
 	events []event.Event
@@ -73,6 +75,7 @@ func (c *Chat) Say(ctx context.Context, content []provider.Block) (string, error
 		Messages:  msgs,
 		MaxTokens: c.MaxTokens,
 		Effort:    c.Effort,
+		Schema:    c.Schema,
 		// The log's own id is the conversation's name, which is how
 		// providers that pin a cache by session find the warm one.
 		Session: c.Log.ID(),
@@ -107,6 +110,12 @@ func (c *Chat) Say(ctx context.Context, content []provider.Block) (string, error
 	}
 	if err := c.Log.Sync(); err != nil {
 		return "", err
+	}
+	if len(c.Schema) > 0 {
+		if turn.Stop != "end" {
+			return "", fmt.Errorf("structured output stopped with %q", turn.Stop)
+		}
+		return structuredAnswer(turn.Blocks), nil
 	}
 	return answer(turn.Blocks), nil
 }
@@ -228,4 +237,18 @@ func answer(blocks []provider.Block) string {
 		}
 	}
 	return strings.TrimSpace(strings.Join(texts, "\n\n"))
+}
+
+// structuredAnswer is byte-for-byte the provider's text stream, apart from
+// surrounding whitespace. JSON allows whitespace between tokens, but not
+// inside them; inserting markdown paragraph breaks between provider blocks
+// can therefore corrupt an otherwise valid document.
+func structuredAnswer(blocks []provider.Block) string {
+	var text strings.Builder
+	for _, bl := range blocks {
+		if bl.Type == provider.Text {
+			text.WriteString(bl.Text)
+		}
+	}
+	return strings.TrimSpace(text.String())
 }

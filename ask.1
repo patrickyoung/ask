@@ -1,4 +1,4 @@
-.TH ASK 1 "2026-08-01" "ask 0.1.0" "General Commands Manual"
+.TH ASK 1 "2026-08-13" "ask 0.1.0" "General Commands Manual"
 .SH NAME
 ask \- put a question through a language model
 .SH SYNOPSIS
@@ -44,11 +44,11 @@ exit status says what happened, so it composes with the rest of the shell.
 There is no tool loop and no agent loop. The model answers, and the answer
 is the product.
 .PP
-Every run appends to an append\-only JSONL session log. The conversation
+Every model turn appends to an append\-only JSONL session log. The conversation
 sent to the model is a pure function of that log \(em each call is preceded
 by a
 .I request
-event recording the exact normalized request, with the conversation itself
+event recording the normalized request fields, with the conversation itself
 stored as a SHA\-256 digest rather than a second copy.
 .B ask replay \-check
 recomputes the fold and compares, which is what makes "replays exactly" a
@@ -64,11 +64,12 @@ forces a word through as a message.
 Ask. Arguments are joined with spaces. Piped or redirected standard input
 becomes the message, or rides with one inside
 .I <stdin>
-delimiters when both are given. By default this continues the current
-conversation; see
-.B \-n
+delimiters when both are given. Surrounding whitespace on textual stdin is
+removed. By default this starts a new conversation; see
+.B \-c
 and
-.BR \-f .
+.BR \-f
+for explicit continuation.
 .TP
 .B ask replay \fR[\fIflags\fR] [\fIsession\fR]
 Re\-render a session. The argument is a path or a bare session id; with
@@ -81,11 +82,10 @@ refuses it outright, because what cannot be read cannot be proved.
 Continue a conversation that filled its window, in a fresh one.
 .IP
 A session that overflows fails identically forever, which is what exit 2
-means. The only way on is to carry less of it, and deciding what to drop is
-a judgment \(em so a model writes a handoff note, and
+means. Continuing requires less context. A model therefore writes a handoff
+note, and
 .B compact
-is the explicit, logged verb that does it rather than something a harness
-does behind you.
+records that operation explicitly.
 .IP
 Three files, three roles. The source is never touched. The summarizer runs
 in a session of its own, so the call that wrote the note replays like any
@@ -105,11 +105,8 @@ other file leaves you where you were. Standard output is the new session's
 path, so it can be handed straight to
 .BR \-f .
 .IP
-Reasoning is left out of the transcript. It is the largest part of a modern
-session and the least transferable \(em provider\-opaque, addressed to a
-turn that is over \(em and leaving it out is most of why a transcript fits
-where the conversation it came from did not. Attachments are named, not
-carried.
+Reasoning is left out of the transcript because it is provider specific.
+Attachment bytes are not carried; the transcript records their media type.
 .IP
 If the transcript does not fit either, that is exit 2 again, naming
 .BR \-m :
@@ -123,38 +120,18 @@ names one, so
 is fork.
 .TP
 .B ask note \fR\-s \fIsource\fR [\fIflags\fR] [\fItext ...\fR]
-Record something a program decided, in the session rather than only in an
-exit status. The text comes from the arguments, or from standard input when
-there are none. No model is called, so there is no request event and nothing
-new to replay.
+Record attributed text in a session. The text comes from the arguments, or
+from standard input when there are none. Standard input is limited to 16 MB.
+No model is called, so there is no request event and nothing new to replay.
 .IP
 .B \-s
-is required and names the program recording it. There is no way to write an
-unattributed note: text that nobody typed belongs in a session only when a
-reader and a program can both tell at a glance who put it there, which is
-the same rule that admits
-.BR compact 's
-handoff note.
+is required, is one word, and names the program recording the note.
 .IP
-A note is not folded. It is a record, not a message, so the conversation a
-provider sees is exactly what it was without it and every digest already
-written still matches. The distinction is worth the word: a failing check
-is a
-.B user
-message because the model has to act on it, while a passing one is
-addressed to nobody, because the run is over.
-.IP
-The verdict is why it exists.
-.BR ply (1)
-decides whether work is done by running a command, and that verdict lived
-only on stderr and in an exit code \(em so a session recorded everything
-that was tried and nothing about whether it worked, and a run that passed
-and a run that failed were the same shape.
-.BR hone (1)
-refuses to learn from a session that does not say.
+A note is not folded. It is a record, not a message, so it does not change
+the conversation sent to a provider or any existing request digest.
 .TP
 .B ask system
-Print the default system prompt on stdout. The default is a value, not a
+Print the built\-in system prompt on stdout. The prompt is a value, not a
 secret, so extending it is ordinary shell rather than a config format:
 .IP
 .EX
@@ -191,34 +168,44 @@ do the same.
 .BI \-a " file"
 Attach a file. Repeat for more, and they reach the model in the order
 given. What a file is comes from reading it, never from its name: a text
-file is inlined with its name, and an image, PDF, audio or video file is
-attached. See
+file is inlined with a sanitized base name, and an image, PDF, audio or video
+file is attached. See
 .B ATTACHMENTS
 below.
 .TP
 .BI \-m " provider/model"
 Model to use, for example
-.IR anthropic/claude\-sonnet\-5 .
-Defaults to
-.BR $ASK_MODEL ,
-and when continuing a session, to the model that session was started with.
+.IR anthropic/your\-model .
+Without
+.BR \-m ,
+.B $ASK_MODEL
+wins when nonempty. Otherwise a continued session uses the model it was
+started with. A new session with neither is an error.
 OpenRouter models keep their own slash:
-.IR openrouter/anthropic/claude\-sonnet\-4.5 .
+.IR openrouter/vendor/model .
 .TP
 .BI \-S " text"
-System prompt, replacing the default. Defaults to
-.BR $ASK_SYSTEM .
+System prompt for this invocation. Without
+.BR \-S ,
+.B $ASK_SYSTEM
+is used when set, otherwise the built\-in prompt is used.
 An explicitly empty
 .B \-S ""
-sends no system prompt at all.
+sends no system prompt at all. The choice is made for each invocation; a
+prompt passed when a session was created is not inherited by later calls.
 .TP
-.B \-n
-Start a new conversation instead of continuing the current one.
+.B \-c
+Continue the session named by the conversation directory's
+.I current
+symlink. A missing or dangling pointer is an error; no other session is
+chosen as a fallback. This cannot be combined with
+.BR \-f .
 .TP
 .BI \-f " file"
 Read and append to this session log, keeping a thread wherever the caller
-wants it. An existing file is continued; a new one is created. This never
-uses the conversation directory's current pointer.
+wants it. An existing file is continued; a nonexistent file is created.
+Other errors inspecting the path are reported. This never consults or
+changes the conversation directory's current pointer.
 .TP
 .BI \-d " dir"
 Conversation directory. Defaults to
@@ -233,18 +220,42 @@ Reasoning effort:
 .IR medium ,
 or
 .IR high .
-The default is the provider's own, with thinking on.
+The default leaves the effort level to the provider. OpenAI and OpenRouter
+receive explicit
+.IR low ,
+.IR medium ,
+and
+.I high
+levels. Anthropic and Gemini do not distinguish those three levels; each
+enables the same thinking configuration. For OpenRouter,
+.I off
+omits the reasoning parameter rather than sending an explicit disable value.
 .TP
 .BI \-max\-tokens " n"
-Maximum output tokens for the answer. Default 16384. An answer cut off at
-this limit is reported on stderr and still exits 0 \(em it is output, just
-incomplete.
+Maximum output tokens for the answer. Default 16384 on adapters that support
+it. An answer cut off at this limit is reported on stderr and still exits 0
+\(em it is output, just
+incomplete. With
+.BR \-schema ,
+a cut off document exits 1 and stdout stays empty.
+.B openai\-codex
+does not support this option; explicitly setting it is an error, and when it
+is omitted no output limit is sent.
+.TP
+.BI \-schema " file"
+Constrain the answer with the self\-contained JSON Schema in
+.IR file .
+A file name of
+.B \-
+reads the schema from standard input; the question must then come from the
+arguments.
 .TP
 .B \-json
-Emit the raw event stream on stdout instead of the answer.
+Emit the raw events written by this invocation on stdout instead of the
+answer.
 .TP
 .B \-q
-Suppress progress on stderr, leaving only the answer.
+Suppress progress on stderr. Errors still go to stderr.
 .TP
 .B \-check
 .RB ( replay )
@@ -252,8 +263,9 @@ Verify the replay invariant and exit.
 .TP
 .BI \-step " n"
 .RB ( replay )
-Print the exact provider request logged at this sequence number, with the
-conversation reconstituted from the fold its digest stands for.
+Print the normalized model request at this sequence number, with the
+conversation reconstituted from the fold its digest stands for. Transport
+routing fields and provider wire transformations are not part of this view.
 .PP
 .B compact
 takes
@@ -266,6 +278,76 @@ with their usual meanings, except that
 names the model that writes the handoff note and defaults to the one the
 source session recorded, not to
 .BR $ASK_MODEL .
+.PP
+.B note
+takes
+.BR \-s ,
+.BR \-f ,
+.BR \-d ,
+and
+.BR \-q .
+.B \-s
+is required and must be one word.
+.SS Login options
+.TP
+.B \-from\-codex
+Import a ChatGPT login from the official Codex CLI auth file. It cannot be
+combined with token flags.
+.TP
+.BI \-access\-token " token"
+Store an access token. A value of
+.B \-
+reads it from standard input.
+.TP
+.BI \-refresh\-token " token"
+Store a refresh token. A value of
+.B \-
+reads it from standard input. Only one token field may read stdin.
+.TP
+.BI \-token\-url " url"
+OAuth token endpoint used to refresh a stored token. It must use HTTPS,
+except on loopback.
+.TP
+.BI \-client\-id " id"
+OAuth client id sent during refresh.
+.TP
+.BI \-scope " scope"
+OAuth scope sent during refresh.
+.TP
+.BI \-expires " duration"
+Lifetime of the supplied access token, in Go duration syntax such as
+.IR 1h .
+.SH STRUCTURED OUTPUT
+.B \-schema
+passes a JSON Schema through the provider's native structured\-output field.
+It does not put the schema in the system prompt or user message. The schema
+is recorded on the request event, beside the other normalized request
+fields, so
+.B replay \-step
+reconstitutes it and
+.B replay \-check
+keeps making the same assertion about the conversation.
+.PP
+After streaming, the answer is parsed and validated locally. Invalid JSON,
+a schema mismatch, a refusal, or a response cut off at the output limit is
+an error and writes no normal answer to stdout. The provider turn remains in
+the append\-only log, followed by a
+.B done
+event naming the error.
+With
+.BR \-json ,
+stdout still carries the requested raw event stream.
+.PP
+Schemas are at most 1 MB and must be one JSON object. Definitions may use
+fragment references within that object; external references are refused.
+These checks happen before a new session file is created. Provider support
+is model dependent: an unsupported model returns a provider error rather
+than falling back to prompt instructions. OpenRouter is restricted to
+endpoints that accept the structured\-output parameters.
+.PP
+.EX
+ask \-schema result.schema.json "extract the incident severity" < alert.txt
+.EE
 .SH ATTACHMENTS
 .B \-a
 attaches a file, and repeats:
@@ -274,6 +356,10 @@ attaches a file, and repeats:
 ask \-a chart.png "what is the trend?"
 ask \-a q3.pdf \-a q4.pdf "what changed between these quarters?"
 .EE
+.PP
+The path must name a nonempty regular file.
+.B \-a \-
+is refused; pipe the data on standard input instead.
 .PP
 What a file is comes from its content. A name is a name, not a type: a
 .I .png
@@ -317,12 +403,13 @@ touched, naming the provider and what it does take. This is checked per
 provider, not per model: a model that is merely the wrong model for the job
 is the provider's own error to report.
 .SS Limits
-At most 16 attachments, 16 MB each, 32 MB in one message. They are fixed,
-because the bytes are read whole, encoded into the session log, and encoded
-again into the request \(em a limit that can be raised from the command line
-is a limit that gets raised until something falls over further away.
+The
+.B \-a
+flags accept at most 16 files, 16 MB each and 32 MB in total. These bounds
+are fixed because the bytes are read whole, encoded into the session log,
+and encoded again into the request.
 .PP
-Standard input is bounded by the same 16 MB, and crossing it is an error
+Standard input has its own 16 MB bound, and crossing it is an error
 rather than a truncation. A filter that quietly dropped the tail of its
 input would answer a question about the first part of a file and present it
 as an answer about the file, and nothing downstream could tell the
@@ -341,15 +428,23 @@ sortable id. The
 .I current
 symlink names the session a bare
 .B ask
-continues, and is repointed on every run.
+most recently started. It is followed only when
+.B \-c
+is explicit. A session selected with
+.B \-f
+never changes
+.IR current .
 .PP
-Because continuing is the default, a pipeline inherits whatever was asked
-before it. When that matters, use
-.B \-n
-or give the thread its own file with
-.BR \-f .
+Because a plain invocation starts fresh, independent pipelines do not inherit
+conversation state. Use
+.B \-c
+for the current conversation or
+.B \-f
+for a named thread.
 Every run that continues a session announces which one it joined and how
-many turns it already holds.
+many turns it already holds, unless
+.B \-q
+suppresses progress.
 .PP
 Only one process may write to a session at a time; a second is refused.
 Two writers would interleave two conversations into one file, and every
@@ -383,12 +478,20 @@ becomes optional behind a gateway or on Vertex, where the credential lives
 in the transport.
 .TP
 .BI < PROVIDER >_BASE_URL
-Point one provider at a corporate gateway, for example
-.BR ANTHROPIC_BASE_URL .
+Replace a provider endpoint. The exact names are
+.BR ANTHROPIC_BASE_URL ,
+.BR OPENAI_BASE_URL ,
+.BR OPENAI_CODEX_BASE_URL ,
+.BR GEMINI_BASE_URL ,
+and
+.BR OPENROUTER_BASE_URL .
 .TP
 .B ASK_AUTH_URL
 OAuth token endpoint for a gateway. Its presence enables bearer
-authentication on every provider.
+authentication for Anthropic, OpenAI, Gemini, and OpenRouter, including
+Anthropic requests using the Vertex wire format. The
+.B openai\-codex
+adapter continues to use its stored subscription credential.
 .B ASK_AUTH_CLIENT_ID
 and
 .B ASK_AUTH_CLIENT_SECRET
@@ -428,6 +531,17 @@ or a specific region such as
 replaces the region\-derived endpoint.
 .B ANTHROPIC_BASE_URL
 is ignored while Vertex is enabled.
+.IP
+.B ask
+does not obtain Google credentials. Use
+.B ASK_AUTH_URL
+or a proxy that adds authentication.
+.TP
+.B CODEX_HOME
+Codex CLI directory used by
+.BR "ask login openai-codex -from-codex" .
+The default is
+.IR ~/.codex .
 .TP
 .B NO_COLOR
 Disable colour on stderr. Colour is used only when stderr is a terminal.
@@ -436,29 +550,39 @@ Disable colour on stderr. Colour is used only when stderr is a terminal.
 .I ~/.ask/sessions/
 Session logs, one JSONL file per conversation, plus the
 .I current
-symlink.
+symlink. Directories created by
+.B ask
+use mode 0700; session files use mode 0600.
 .TP
 .I ~/.ask/auth.json
-Stored credentials, mode 0600.
+Stored credentials, created with mode 0600. The path is replaced by
+.BR $ASK_AUTH_FILE
+when set.
 .SH EXIT STATUS
 .TP
 .B 0
-The model answered.
+The command completed successfully. For an ask turn, the model answered.
 .TP
 .B 1
 An error: bad usage, a missing key, a provider failure, a corrupt log, or
-a turn that produced no text.
+a turn that produced no text. Structured output also uses exit 1 for invalid
+JSON, a schema mismatch, a refusal, or an incomplete stop.
 .TP
 .B 2
 The context window is full. This is permanent for that conversation \(em
 the same request will fail identically forever \(em so it is told apart
 from an ordinary error, and a retry loop can stop instead of grinding.
-Start a new conversation with
-.BR \-n .
+Start a new conversation by omitting
+.B \-c
+and
+.BR \-f .
 .TP
 .B 130
-Interrupted. The partial turn is logged as partial and excluded from
-context, so the session can be continued and the question asked again.
+Interrupted. Any blocks already streamed are logged as a partial turn and
+excluded from context. An
+.B abort
+event records the interruption, so the session can be continued and the
+question asked again.
 .SH EXAMPLES
 Ask a question:
 .PP
@@ -472,84 +596,53 @@ Use a pipe as the data and the argument as the instruction:
 git diff \(bv ask "write a commit message"
 .EE
 .PP
-Keep stdout clean and watch progress on the terminal:
-.PP
-.EX
-ask "explain this error" < build.log > answer.txt
-.EE
-.PP
-Continue, then branch off:
+Continue one conversation, then start another:
 .PP
 .EX
 ask "what is a monad"
-ask "give me an example in Go"
-ask \-n "unrelated question"
+ask \-c "give me an example in Go"
+ask "unrelated question"
 .EE
 .PP
-Keep a thread of its own, and prove it later:
+Keep a named thread and verify it later:
 .PP
 .EX
 ask \-f review.jsonl "review this diff" < patch
-ask \-f review.jsonl "now summarize the risks"
+ask \-f review.jsonl "summarize the risks"
 ask replay \-check review.jsonl
 .EE
 .PP
-Extend the default system prompt instead of replacing it:
+Require JSON that another program can test:
 .PP
 .EX
-ask \-S "$(ask system; cat house\-style.md)" "draft the release note"
+ask \-schema decision.schema.json "classify this alert" < alert.txt \
+  \(bv jq \-e '.urgent'
 .EE
 .PP
-Ask about what is on the screen, all of it or a region:
+Attach two files in order:
 .PP
 .EX
-screencapture \-x \-t png \- \(bv ask "what is on my screen?"
-screencapture \-x \-R0,0,900,300 \-t png /tmp/r.png
-ask \-a /tmp/r.png "what is this showing?"
+ask \-a before.png \-a after.png "list what changed"
 .EE
 .PP
-Turn a picture of a page into something
-.BR jq (1)
-can test, with no OCR installed:
+Add an attributed record without calling a model:
 .PP
 .EX
-qlmanage \-t \-s 1400 \-o . report.pdf
-ask \-a report.pdf.png 'Return ONLY minified JSON: {"runway_months":0}' > r.json
-test "$(jq \-r .runway_months r.json)" \-lt 12 && echo escalate
+ask note \-s test \-f review.jsonl "go test ./... passed"
 .EE
 .PP
-Compare two images \(em two quarters of a report, or two screenshots of a
-user interface:
+Continue a full conversation from an explicit handoff:
 .PP
 .EX
-ask \-a before.png \-a after.png "List only what changed, one per line."
+new=$(ask compact)
+ask \-f "$new" "continue with the next case"
 .EE
 .PP
-Extract a folder of documents into one CSV, in parallel, keyed by index so
-completion order cannot scramble the rows:
+Branch on the answer, not merely on exit 0:
 .PP
 .EX
-mkdir \-p out; i=0
-for f in *.pdf; do
-  i=$((i+1))
-  ( ask \-n \-q \-a "$f" 'ONE line of CSV, no header: quarter,revenue,runway' \e
-      > "out/$(printf '%03d' $i)" ) &
-done
-wait; cat out/*
-.EE
-.PP
-Read several documents into one conversation, then ask something no single
-one of them answers:
-.PP
-.EX
-for q in q1 q2 q3; do ask \-q \-a $q.pdf "Next report."; done
-ask \-q "Across all three, name the trend that most threatens this company."
-.EE
-.PP
-Branch a script on the outcome:
-.PP
-.EX
-if ask \-q "does this log show an OOM?" < kern.log; then ...; fi
+if ask \-q "does this log show an OOM? answer yes or no" < kern.log \
+  \(bv grep \-Eiq '^yes$'; then echo OOM; fi
 .EE
 .PP
 Prove every session on disk still replays:
@@ -558,24 +651,17 @@ Prove every session on disk still replays:
 for f in ~/.ask/sessions/*.jsonl; do ask replay \-check "$f" || echo "$f"; done
 .EE
 .SH DIAGNOSTICS
-Progress, reasoning, retries and the closing token count all go to stderr,
+Progress, reasoning, retries, errors and the closing token count go to stderr,
 so
 .B 2>/dev/null
 leaves the answer alone. Reasoning renders dimmed when stderr is a
 terminal. When stdout and stderr are the same file or terminal, the answer
-is not printed twice.
+is not printed twice. With
+.BR \-q ,
+progress is suppressed but errors still print.
 .SH SEE ALSO
-.BR brief (1),
-.BR hone (1),
 .BR jq (1),
-.BR ply (1)
-.SH HISTORY
-.B ask
-is the conversational core of
-.BR mu ,
-a file\-based agent, carved out as a filter: the provider layer, the
-credential handling and the replay invariant, without the tool loop, the
-verifier, or the workspace.
+.BR sh (1)
 .SH CAVEATS
 A word one edit from a command is refused rather than sent to the model.
 This is deliberate \(em a typo would otherwise be a paid model call

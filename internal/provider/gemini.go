@@ -146,6 +146,10 @@ func geminiParams(req Request) (*genai.GenerateContentConfig, []*genai.Content, 
 	if req.Effort != "off" {
 		cfg.ThinkingConfig = &genai.ThinkingConfig{IncludeThoughts: true}
 	}
+	if len(req.Schema) > 0 {
+		cfg.ResponseMIMEType = "application/json"
+		cfg.ResponseJsonSchema = schemaObject(req.Schema)
+	}
 	var contents []*genai.Content
 	for _, m := range Merge(req.Messages) {
 		if m.Role == Assistant {

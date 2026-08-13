@@ -62,6 +62,26 @@ data: {"type":"message_stop"}
 
 `
 
+const structuredWire = `event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"test-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"{\"n\":7}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+
 // plainJSON re-encodes a request body with HTML escaping off. Go escapes
 // <, > and & inside JSON strings by default, so a body read straight off
 // the wire spells "<stdin>" as an escape sequence; round-tripping it keeps
@@ -235,6 +255,191 @@ func TestFilterContract(t *testing.T) {
 	}
 }
 
+func TestStructuredOutputIsNativeValidatedAndReplayable(t *testing.T) {
+	dir, calls, bodies := fake(t, 200, structuredWire)
+	path := writeSchema(t, numberSchema)
+	code, stdout, stderr := exec(t, "", "-q", "-schema", path, "extract the number")
+	if code != 0 {
+		t.Fatalf("exit = %d: %s", code, stderr)
+	}
+	if stdout != `{"n":7}`+"\n" {
+		t.Errorf("stdout = %q, want the JSON document alone", stdout)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("provider calls = %d, want 1", calls.Load())
+	}
+	body := (*bodies)[0]
+	for _, want := range []string{`"output_config"`, `"format"`, `"type":"json_schema"`, `"additionalProperties":false`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("native structured-output request missing %s:\n%s", want, body)
+		}
+	}
+	events, err := event.ReadFile(filepath.Join(dir, sessions(t, dir)[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := event.Check(events); err != nil {
+		t.Errorf("structured session does not replay: %v", err)
+	}
+	found := false
+	for _, e := range events {
+		if e.Type != event.Request {
+			continue
+		}
+		req, err := event.As[provider.Request](e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var schema map[string]any
+		if err := json.Unmarshal(req.Schema, &schema); err != nil {
+			t.Fatal(err)
+		}
+		found = schema["type"] == "object"
+	}
+	if !found {
+		t.Error("request event did not record the output schema")
+	}
+}
+
+func TestStructuredSchemaNumberSurvivesWireAndReplay(t *testing.T) {
+	dir, _, bodies := fake(t, 200, structuredWire)
+	const exact = "9007199254740993"
+	schema := `{
+  "type": "object",
+  "properties": {
+    "n": {"type": "integer"},
+    "unused": {"const": ` + exact + `}
+  },
+  "required": ["n"]
+}`
+	code, _, stderr := exec(t, "", "-q", "-schema", writeSchema(t, schema), "extract the number")
+	if code != 0 {
+		t.Fatalf("exit = %d: %s", code, stderr)
+	}
+	if !strings.Contains((*bodies)[0], exact) {
+		t.Errorf("provider request changed exact schema number:\n%s", (*bodies)[0])
+	}
+
+	name := sessions(t, dir)[0]
+	events, err := event.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := 0
+	for _, e := range events {
+		if e.Type == event.Request {
+			step = e.Seq
+			break
+		}
+	}
+	code, stdout, stderr := exec(t, "", "replay", "-d", dir, "-step", fmt.Sprint(step), name)
+	if code != 0 {
+		t.Fatalf("replay exit = %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, exact) {
+		t.Errorf("replayed request changed exact schema number:\n%s", stdout)
+	}
+}
+
+func TestStructuredOutputFailureLeavesStdoutEmpty(t *testing.T) {
+	dir, _, _ := fake(t, 200, answerWire)
+	code, stdout, stderr := exec(t, "", "-schema", writeSchema(t, numberSchema), "extract the number")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr:\n%s", code, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("invalid structured output leaked to stdout: %q", stdout)
+	}
+	if !strings.Contains(stderr, "structured output is not valid JSON") {
+		t.Errorf("stderr does not name the failed contract:\n%s", stderr)
+	}
+	if len(sessions(t, dir)) != 1 {
+		t.Error("the failed provider turn should remain recorded")
+	}
+}
+
+func TestStructuredSchemaMismatchLeavesStdoutEmpty(t *testing.T) {
+	dir, _, _ := fake(t, 200, structuredWire)
+	schema := strings.Replace(numberSchema, `"integer"`, `"string"`, 1)
+	code, stdout, stderr := exec(t, "", "-schema", writeSchema(t, schema), "extract the number")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr:\n%s", code, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("schema mismatch leaked to stdout: %q", stdout)
+	}
+	if !strings.Contains(stderr, "structured output does not match schema") {
+		t.Errorf("stderr does not name the failed contract:\n%s", stderr)
+	}
+	if len(sessions(t, dir)) != 1 {
+		t.Error("the rejected provider turn should remain recorded")
+	}
+}
+
+func TestStructuredFailureStillEmitsRawEvents(t *testing.T) {
+	fake(t, 200, answerWire)
+	code, stdout, stderr := exec(t, "", "-q", "-json", "-schema", writeSchema(t, numberSchema), "extract the number")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stdout, `"type":"assistant"`) || !strings.Contains(stdout, `"type":"done"`) {
+		t.Errorf("raw event stream did not record the rejected turn:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "structured output is not valid JSON") {
+		t.Errorf("stderr does not name the failed contract:\n%s", stderr)
+	}
+}
+
+func TestBadSchemaFailsBeforeCreatingASession(t *testing.T) {
+	dir, calls, _ := fake(t, 200, structuredWire)
+	code, stdout, stderr := exec(t, "", "-schema", writeSchema(t, `{`), "hi")
+	if code != 1 || stdout != "" {
+		t.Fatalf("exit/stdout = %d/%q, want 1/empty", code, stdout)
+	}
+	if !strings.Contains(stderr, "schema is not valid JSON") {
+		t.Errorf("stderr = %q", stderr)
+	}
+	if calls.Load() != 0 || len(sessions(t, dir)) != 0 {
+		t.Errorf("bad schema made %d calls and %d sessions", calls.Load(), len(sessions(t, dir)))
+	}
+}
+
+func TestSchemaCanComeFromStdin(t *testing.T) {
+	_, _, bodies := fake(t, 200, structuredWire)
+	code, stdout, stderr := exec(t, numberSchema, "-q", "-schema", "-", "extract the number")
+	if code != 0 || stdout != `{"n":7}`+"\n" {
+		t.Fatalf("exit/stdout = %d/%q: %s", code, stdout, stderr)
+	}
+	if !strings.Contains((*bodies)[0], `"output_config"`) {
+		t.Error("schema read from stdin did not reach the provider")
+	}
+}
+
+func TestEmptySchemaStillMeansStructuredJSON(t *testing.T) {
+	dir, _, bodies := fake(t, 200, structuredWire)
+	code, stdout, stderr := exec(t, "", "-q", "-schema", writeSchema(t, `{}`), "return some JSON")
+	if code != 0 || stdout != `{"n":7}`+"\n" {
+		t.Fatalf("exit/stdout = %d/%q: %s", code, stdout, stderr)
+	}
+	if !strings.Contains((*bodies)[0], `"output_config"`) {
+		t.Error("empty schema was mistaken for no structured-output request")
+	}
+	events, err := event.ReadFile(filepath.Join(dir, sessions(t, dir)[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Type == event.Request {
+			req, _ := event.As[provider.Request](e)
+			if string(req.Schema) != `{}` {
+				t.Errorf("logged schema = %#v, want present empty object", req.Schema)
+			}
+			return
+		}
+	}
+	t.Error("no request event")
+}
+
 // TestSameOutSuppressesTheEcho: when stdout and stderr are the same place,
 // the answer already streamed — printing it again would double it.
 func TestSameOutSuppressesTheEcho(t *testing.T) {
@@ -248,9 +453,8 @@ func TestSameOutSuppressesTheEcho(t *testing.T) {
 	}
 }
 
-// TestContinuesByDefault: the second ask carries the first exchange, and
-// says so on stderr — continuing must never be a silent surprise.
-func TestContinuesByDefault(t *testing.T) {
+// TestFreshByDefault: a filter does not inherit hidden conversation state.
+func TestFreshByDefault(t *testing.T) {
 	dir, _, bodies := fake(t, 200, answerWire)
 	if code, _, e := exec(t, "", "first question"); code != 0 {
 		t.Fatalf("exit = %d: %s", code, e)
@@ -259,14 +463,31 @@ func TestContinuesByDefault(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d: %s", code, stderr)
 	}
+	if len(sessions(t, dir)) != 2 {
+		t.Errorf("two asks created sessions %v, want two", sessions(t, dir))
+	}
+	if strings.Contains((*bodies)[1], "first question") {
+		t.Error("plain ask carried the previous conversation into a fresh request")
+	}
+	if strings.Contains(stderr, "continuing") {
+		t.Errorf("fresh ask claimed to continue a conversation:\n%s", stderr)
+	}
+}
+
+// TestContinueCurrent: -c carries the current exchange and says which
+// conversation it joined.
+func TestContinueCurrent(t *testing.T) {
+	dir, _, bodies := fake(t, 200, answerWire)
+	exec(t, "", "first question")
+	code, _, stderr := exec(t, "", "-c", "second question")
+	if code != 0 {
+		t.Fatalf("exit = %d: %s", code, stderr)
+	}
 	if len(sessions(t, dir)) != 1 {
 		t.Errorf("continuing created a second session: %v", sessions(t, dir))
 	}
-	if !strings.Contains(stderr, "1 turns so far") {
+	if !strings.Contains(stderr, "continuing") || !strings.Contains(stderr, "1 turns so far") {
 		t.Errorf("stderr does not announce the conversation being joined:\n%s", stderr)
-	}
-	if !strings.Contains(stderr, "-n starts fresh") {
-		t.Errorf("stderr does not say how to start fresh:\n%s", stderr)
 	}
 	second := (*bodies)[1]
 	for _, want := range []string{"first question", "the answer", "second question"} {
@@ -276,20 +497,36 @@ func TestContinuesByDefault(t *testing.T) {
 	}
 }
 
-// TestNewStartsFresh: -n is the escape hatch, and the old conversation is
-// left intact beside the new one.
-func TestNewStartsFresh(t *testing.T) {
-	dir, _, bodies := fake(t, 200, answerWire)
-	exec(t, "", "first question")
-	code, _, stderr := exec(t, "", "-n", "unrelated question")
-	if code != 0 {
-		t.Fatalf("exit = %d: %s", code, stderr)
+func TestContinueRequiresCurrent(t *testing.T) {
+	dir, calls, _ := fake(t, 200, answerWire)
+	code, stdout, stderr := exec(t, "", "-c", "follow up")
+	if code != 1 || !strings.Contains(stderr, "no current conversation") {
+		t.Fatalf("exit = %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
-	if n := len(sessions(t, dir)); n != 2 {
-		t.Fatalf("have %d sessions, want 2", n)
+	if calls.Load() != 0 || len(sessions(t, dir)) != 0 {
+		t.Fatal("failed continuation called the provider or created a session")
 	}
-	if strings.Contains((*bodies)[1], "first question") {
-		t.Error("-n carried the previous conversation into the new one")
+}
+
+func TestContinueAndFileAreMutuallyExclusive(t *testing.T) {
+	dir, calls, _ := fake(t, 200, answerWire)
+	code, _, stderr := exec(t, "", "-c", "-f", "thread.jsonl", "follow up")
+	if code != 1 || !strings.Contains(stderr, "cannot be used together") {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if calls.Load() != 0 || len(sessions(t, dir)) != 0 {
+		t.Fatal("bad selectors called the provider or created a session")
+	}
+}
+
+func TestRemovedNewFlagFailsLoudly(t *testing.T) {
+	dir, calls, _ := fake(t, 200, answerWire)
+	code, _, stderr := exec(t, "", "-n", "question")
+	if code != 1 || !strings.Contains(stderr, "flag provided but not defined: -n") {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if calls.Load() != 0 || len(sessions(t, dir)) != 0 {
+		t.Fatal("removed -n called the provider or created a session")
 	}
 }
 
@@ -316,6 +553,41 @@ func TestSessionFileKeepsItsOwnThread(t *testing.T) {
 	}
 	if err := event.Check(events); err != nil {
 		t.Errorf("thread does not replay: %v", err)
+	}
+}
+
+func TestSessionFileNeverChangesCurrent(t *testing.T) {
+	dir, _, _ := fake(t, 200, answerWire)
+	exec(t, "", "current question")
+	before, err := event.Current(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread := filepath.Join(dir, "named.jsonl")
+	if code, _, stderr := exec(t, "", "-f", thread, "named question"); code != 0 {
+		t.Fatalf("exit = %d: %s", code, stderr)
+	}
+	after, err := event.Current(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Errorf("-f moved current from %s to %s", before, after)
+	}
+}
+
+func TestSessionFileReportsStatErrors(t *testing.T) {
+	dir, calls, _ := fake(t, 200, answerWire)
+	parent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := exec(t, "", "-f", filepath.Join(parent, "thread.jsonl"), "question")
+	if code != 1 || !strings.Contains(stderr, "session") {
+		t.Fatalf("exit = %d, stderr %q", code, stderr)
+	}
+	if calls.Load() != 0 || len(sessions(t, dir)) != 0 {
+		t.Fatal("bad -f path called the provider or created a session")
 	}
 }
 
@@ -387,7 +659,7 @@ func TestOverflowExitsTwo(t *testing.T) {
 	if stdout != "" {
 		t.Errorf("stdout = %q, want empty", stdout)
 	}
-	if !strings.Contains(stderr, "-n") {
+	if !strings.Contains(stderr, "without -c or -f") {
 		t.Errorf("stderr does not say how to recover:\n%s", stderr)
 	}
 }
@@ -444,8 +716,8 @@ func TestNoModelLeavesNoLitter(t *testing.T) {
 func TestReplayCheckProvesTheSession(t *testing.T) {
 	fake(t, 200, answerWire)
 	exec(t, "", "first")
-	exec(t, "", "second")
-	exec(t, "", "third")
+	exec(t, "", "-c", "second")
+	exec(t, "", "-c", "third")
 
 	code, stdout, stderr := exec(t, "", "replay", "-check")
 	if code != 0 {
@@ -621,8 +893,8 @@ func TestJSONEmitsEventsNotProse(t *testing.T) {
 	}
 }
 
-// TestQuietSilencesStderr: -q leaves only the answer.
-func TestQuietSilencesStderr(t *testing.T) {
+// TestQuietSuppressesProgress: on success, -q leaves only the answer.
+func TestQuietSuppressesProgress(t *testing.T) {
 	fake(t, 200, answerWire)
 	code, stdout, stderr := exec(t, "", "-q", "hi")
 	if code != 0 {
@@ -762,20 +1034,35 @@ func TestHeaderRecordsProvenance(t *testing.T) {
 	}
 }
 
-// TestContinuingInheritsTheModel: `ask` twice in a row should not need -m
-// the second time.
+// TestContinuingInheritsTheModel: ask -c does not need -m again.
 func TestContinuingInheritsTheModel(t *testing.T) {
 	fake(t, 200, answerWire)
 	if code, _, e := exec(t, "", "first"); code != 0 {
 		t.Fatalf("exit = %d: %s", code, e)
 	}
 	t.Setenv("ASK_MODEL", "") // nothing on the command line either
-	code, stdout, stderr := exec(t, "", "second")
+	code, stdout, stderr := exec(t, "", "-c", "second")
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr:\n%s", code, stderr)
 	}
 	if stdout != "the answer\n" {
 		t.Errorf("stdout = %q", stdout)
+	}
+}
+
+func TestOpenAICodexRefusesExplicitMaxTokens(t *testing.T) {
+	for _, limit := range []string{"1", "16384"} {
+		t.Run(limit, func(t *testing.T) {
+			dir, calls, _ := fake(t, 200, answerWire)
+			t.Setenv("ASK_MODEL", "openai-codex/test")
+			code, stdout, stderr := exec(t, "", "-max-tokens", limit, "hi")
+			if code != 1 || !strings.Contains(stderr, "-max-tokens is not supported by openai-codex") {
+				t.Fatalf("exit = %d, stdout %q, stderr %q", code, stdout, stderr)
+			}
+			if calls.Load() != 0 || len(sessions(t, dir)) != 0 {
+				t.Fatal("unsupported -max-tokens called the provider or created a session")
+			}
+		})
 	}
 }
 
@@ -823,7 +1110,11 @@ func TestDocsCoverEveryFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	man := strings.ReplaceAll(string(raw), `\`, "")
-	for _, f := range []string{"-m", "-S", "-n", "-a", "-f", "-d", "-effort", "-max-tokens", "-json", "-q", "-check", "-step"} {
+	for _, f := range []string{
+		"-m", "-S", "-c", "-a", "-f", "-d", "-effort", "-max-tokens",
+		"-schema", "-json", "-q", "-check", "-step", "-s", "-from-codex",
+		"-access-token", "-refresh-token", "-token-url", "-client-id", "-scope", "-expires",
+	} {
 		if !strings.Contains(usageText, f+" ") && !strings.Contains(usageText, f+"\n") {
 			t.Errorf("flag %s is missing from ask help", f)
 		}
@@ -903,8 +1194,11 @@ func TestEnvVarsAreDocumented(t *testing.T) {
 	}
 	for _, v := range []string{
 		"ASK_MODEL", "ASK_SYSTEM", "ASK_DIR", "ASK_AUTH_FILE", "ASK_AUTH_URL",
+		"ASK_AUTH_CLIENT_ID", "ASK_AUTH_CLIENT_SECRET", "ASK_AUTH_REFRESH_TOKEN", "ASK_AUTH_SCOPE",
 		"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY",
-		"ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION", "NO_COLOR",
+		"ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "OPENAI_CODEX_BASE_URL", "GEMINI_BASE_URL", "OPENROUTER_BASE_URL",
+		"ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_BASE_URL",
+		"CODEX_HOME", "NO_COLOR",
 	} {
 		if !strings.Contains(string(man), v) {
 			t.Errorf("%s is not documented in ask.1", v)

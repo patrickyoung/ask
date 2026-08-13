@@ -17,8 +17,8 @@ import (
 // Corporate gateways (Kong and kin) front provider APIs behind OAuth: a
 // token endpoint issues short-lived bearer tokens, and the gateway holds
 // the vendor keys itself. ask treats that as a transport property, not a
-// provider feature — one authenticating http.Client, shared by every
-// adapter, switched on by ASK_AUTH_URL:
+// provider feature — one authenticating http.Client, shared by the API-key
+// adapters, switched on by ASK_AUTH_URL:
 //
 //	ASK_AUTH_URL            token endpoint (presence enables OAuth)
 //	ASK_AUTH_CLIENT_ID      \ client credentials; secret sent as
@@ -148,7 +148,7 @@ func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, err
 }
 
-// oauthClient returns the authenticating client shared by every adapter,
+// oauthClient returns the authenticating client used by API-key adapters,
 // or nil when ASK_AUTH_URL is not set. A cleartext endpoint is refused
 // here, at configuration time, rather than at the first token fetch: a
 // deploy script with http:// in it should fail on the run that introduces

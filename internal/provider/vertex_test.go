@@ -83,7 +83,11 @@ func TestVertexGatewayEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New on Vertex without a vendor key: %v", err)
 	}
-	req := Request{Model: model, MaxTokens: 16, Messages: []Message{{Role: User, Blocks: []Block{{Type: Text, Text: "hi"}}}}}
+	req := Request{
+		Model: model, MaxTokens: 16,
+		Messages: []Message{{Role: User, Blocks: []Block{{Type: Text, Text: "hi"}}}},
+		Schema:   json.RawMessage(`{"type":"object"}`),
+	}
 	d := checkContract(t, p.Stream(context.Background(), req))
 	if d.stop != "end" {
 		t.Fatalf("stop = %q, want end", d.stop)
@@ -104,6 +108,9 @@ func TestVertexGatewayEndToEnd(t *testing.T) {
 	}
 	if string(gotBody["stream"]) != "true" {
 		t.Errorf("stream = %s, want true (ask always streams)", gotBody["stream"])
+	}
+	if !bytes.Contains(gotBody["output_config"], []byte(`"type":"json_schema"`)) {
+		t.Errorf("Vertex rewrite dropped structured output: %s", gotBody["output_config"])
 	}
 }
 

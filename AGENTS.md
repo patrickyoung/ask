@@ -12,6 +12,9 @@ When changing `ask`:
 - preserve the Unix contract: stdout is the answer alone, stderr is
   progress, the exit code is the outcome. Exit 2 means the context window
   is full and nothing else — it exists so a retry loop can stop;
+- keep conversation state explicit. A plain `ask` starts fresh; `-c`
+  continues exactly `current` and fails if that pointer is unavailable;
+  `-f` continues or creates only the named file and never moves `current`;
 - never weaken the replay invariant. `event.Check` has two branches and
   both are the same assertion; a request that records neither messages nor
   a digest is a hard error, so a lost field cannot make the check
@@ -29,6 +32,12 @@ When changing `ask`:
   steps that are not one operation, and pids are recycled;
 - fail before creating a session file. A bad invocation must leave no
   litter;
+- keep structured output at the boundary. A schema is raw request metadata,
+  never prompt text and never part of `Fold`; each adapter maps it to the
+  provider's native field. Validate the completed document only after the
+  four logged steps and before admitting it to normal stdout. A rejected
+  document remains an honest assistant turn in the append-only log; do not
+  repair it with another model call or hide it from replay;
 
 - **a note is a record, not a message.** `ask note` puts text in a session
   without a model call, and it is not folded — so the conversation a
@@ -69,8 +78,9 @@ When changing `ask`:
   flag-level check stays green while an entire verb goes undocumented.
 
 Things left out on purpose. Do not add them back without asking: tools, an
-agent loop, a verifier, a workspace, skills, prompt templates, a config
-file, a REPL, a daemon, and MCP.
+agent loop, a model verifier loop, a workspace, skills, prompt templates, a
+config file, a REPL, a daemon, and MCP. Local JSON Schema validation is an
+output check, not a second model turn.
 
 Text enters a conversation from argv and stdin. `ask compact` is the single
 exception, added deliberately because exit 2 was otherwise a dead end, and

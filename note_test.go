@@ -103,7 +103,7 @@ func TestNoteIsNotFolded(t *testing.T) {
 	if err := event.Check(events(t, cur)); err != nil {
 		t.Fatalf("replay check after note: %v", err)
 	}
-	if code, _, se := exec(t, "", "second"); code != 0 {
+	if code, _, se := exec(t, "", "-c", "second"); code != 0 {
 		t.Fatalf("continuing: exit %d, %s", code, se)
 	}
 	if err := event.Check(events(t, cur)); err != nil {
