@@ -75,7 +75,8 @@ flags:
   -d dir        conversation directory ($ASK_DIR, or ~/.ask/sessions)
   -effort e     reasoning effort: off, low, medium, high; provider mapping
                 varies (default: the provider's own)
-  -max-tokens n max output tokens (default 16384; not sent to openai-codex)
+  -max-tokens n max output tokens (default 16384). openai-codex does not
+                support this flag and refuses it
   -schema file  constrain the answer with JSON Schema ("-" reads stdin)
   -json         emit this invocation's raw events instead of the answer
   -q            no progress on stderr; errors still print
@@ -241,10 +242,13 @@ func cmdAsk(args []string) int {
 	if *continuing && *file != "" {
 		return fail(errors.New("-c and -f cannot be used together"))
 	}
-	sysSet := false
+	sysSet, maxTokensSet := false, false
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "S" {
+		switch f.Name {
+		case "S":
 			sysSet = true
+		case "max-tokens":
+			maxTokensSet = true
 		}
 	})
 	switch *effort {
@@ -280,6 +284,9 @@ func cmdAsk(args []string) int {
 	}
 	if *spec == "" {
 		return fail(errors.New("no model: pass -m provider/model or set ASK_MODEL"))
+	}
+	if maxTokensSet && strings.HasPrefix(*spec, "openai-codex/") {
+		return fail(errors.New("-max-tokens is not supported by openai-codex"))
 	}
 	prov, model, err := provider.New(*spec)
 	if err != nil {

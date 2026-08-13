@@ -232,13 +232,15 @@ enables the same thinking configuration. For OpenRouter,
 omits the reasoning parameter rather than sending an explicit disable value.
 .TP
 .BI \-max\-tokens " n"
-Maximum output tokens for the answer. Default 16384. An answer cut off at
-this limit is reported on stderr and still exits 0 \(em it is output, just
+Maximum output tokens for the answer. Default 16384 on adapters that support
+it. An answer cut off at this limit is reported on stderr and still exits 0
+\(em it is output, just
 incomplete. With
 .BR \-schema ,
-a cut off document exits 1 and stdout stays empty. The
+a cut off document exits 1 and stdout stays empty.
 .B openai\-codex
-adapter does not send this field.
+does not support this option; explicitly setting it is an error, and when it
+is omitted no output limit is sent.
 .TP
 .BI \-schema " file"
 Constrain the answer with the self\-contained JSON Schema in

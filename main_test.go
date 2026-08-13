@@ -1050,6 +1050,22 @@ func TestContinuingInheritsTheModel(t *testing.T) {
 	}
 }
 
+func TestOpenAICodexRefusesExplicitMaxTokens(t *testing.T) {
+	for _, limit := range []string{"1", "16384"} {
+		t.Run(limit, func(t *testing.T) {
+			dir, calls, _ := fake(t, 200, answerWire)
+			t.Setenv("ASK_MODEL", "openai-codex/test")
+			code, stdout, stderr := exec(t, "", "-max-tokens", limit, "hi")
+			if code != 1 || !strings.Contains(stderr, "-max-tokens is not supported by openai-codex") {
+				t.Fatalf("exit = %d, stdout %q, stderr %q", code, stdout, stderr)
+			}
+			if calls.Load() != 0 || len(sessions(t, dir)) != 0 {
+				t.Fatal("unsupported -max-tokens called the provider or created a session")
+			}
+		})
+	}
+}
+
 // TestUsageTextFitsEightyColumns: help is read in a terminal.
 func TestUsageTextFitsEightyColumns(t *testing.T) {
 	for i, line := range strings.Split(usageText, "\n") {
