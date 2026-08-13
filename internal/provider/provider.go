@@ -247,10 +247,11 @@ func (e *Error) Overflow() bool {
 var Providers = []string{"anthropic", "openai", "openai-codex", "gemini", "openrouter"}
 
 // New returns the adapter and bare model name for a spec of the form
-// provider/model, e.g. "anthropic/claude-sonnet-5" or
-// "openrouter/deepseek/deepseek-v4" (openrouter models keep their slash).
-// <PROVIDER>_BASE_URL points an adapter at a corporate gateway, and
-// ASK_AUTH_URL adds OAuth bearer authentication for it (see oauth.go).
+// provider/model, e.g. "anthropic/your-model" or
+// "openrouter/vendor/model" (OpenRouter models keep their slash).
+// <PROVIDER>_BASE_URL replaces an adapter endpoint. ASK_AUTH_URL adds OAuth
+// bearer authentication for API-key adapters (see oauth.go); openai-codex
+// uses its stored subscription credential.
 // ANTHROPIC_VERTEX_PROJECT_ID routes anthropic models through Google
 // Vertex AI (see vertex.go).
 func New(spec string) (Provider, string, error) {

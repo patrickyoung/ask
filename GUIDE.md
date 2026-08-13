@@ -1,670 +1,294 @@
 # The ask field guide
 
-The measurements and transcripts here came from macOS 26.5.2 and a real
-ChatGPT/Codex subscription (`openai-codex/gpt-5.6-sol`). Numbers are measured,
-not estimated. Command lines use the current interface; where something
-failed, it says so.
+`ask` does one job: it turns a message into an answer.
 
-```
-ask login openai-codex -from-codex
-export ASK_MODEL=openai-codex/gpt-5.6-sol
-```
+The shell supplies the message. `ask` supplies the judgment. The shell uses
+the answer.
 
-> The model name matters. `gpt-5.1-codex` returns *"not supported when using
-> Codex with a ChatGPT account"*. Use whatever your `~/.codex/config.toml`
-> says. `awk -F'"' '/^model/{print $2}' ~/.codex/config.toml`
-
----
-
-## The one idea
-
-`ask` has no tools. It cannot open a file, run a command, browse the web, or
-see an image. It reads stdin and writes stdout. That sounds like a
-limitation, and it is — but it is also the whole design:
-
-**The shell is its hands. The log is its memory.**
-
-Every pattern in this guide is the same three beats:
-
-```
-gather evidence (shell)  →  reason over it (ask)  →  act on the result (shell)
+```text
+collect data  ->  ask  ->  inspect or act
 ```
 
-The tool that gathers is `ps`, `git`, `log show`, `pbpaste`, `sqlite3`,
-`osascript` — things your Mac already has and that already do their jobs
-perfectly. `ask` is the missing verb between them: *understand this*.
+This separation explains the interface. `ask` has no filesystem tools and
+runs no commands. If the model needs a fact, put that fact in the message.
 
----
+## Choose the conversation first
 
-## What it is good at
+A plain `ask` continues the current conversation. That is useful at a
+terminal and usually wrong in an independent script.
 
-### 1. Swallowing something enormous in one gulp
-
-The entire `mu` Go codebase — 517 KB, 46 files — piped into a single
-invocation:
-
-```bash
-find ~/projects/micro-agent -name '*.go' -exec cat {} + |
-  ask "Name the single most subtle invariant this codebase protects,
-       and the file that enforces it. Two lines max."
+```sh
+ask 'Explain this interface.'       # continue current
+ask 'Now give one example.'         # same conversation
+ask -n 'Review this file.' < x.go   # new conversation
+ask -f audit.jsonl 'Begin audit.'   # named conversation
 ```
 
-```
-Every request's logged conversation digest must exactly match folding all
-preceding context-bearing events.
-internal/event/fold.go (event.Check)
-```
+Use these rules:
 
-**149,300 input tokens, 8.5 seconds, correct.** That is not summarisation —
-it found the one architectural invariant that makes the project work, and
-named the function that enforces it.
+- Interactive follow-up: use the default.
+- Independent script: use `-n`.
+- Work with a stable name: use `-f file.jsonl`.
+- Parallel work: give every process its own session with `-n` or a distinct
+  `-f` path.
 
-Measured ceiling: **~1.2 MB of text accepted** in one call. At 6 MB the
-request never completed. There is no chunking inside `ask`; see the rolling
-digest below for corpora bigger than the window.
+One session has one writer. A second writer is refused because interleaved
+turns would no longer describe one conversation.
 
-### 2. Producing exact shapes that are safe to drive a shell
+## Form the message
 
-The shape is a JSON Schema now, not emphatic prose in the request:
+Arguments are the instruction. Text on stdin is the evidence.
 
-```bash
-cat > number.schema.json <<'JSON'
-{"type":"object","properties":{"n":{"type":"integer"},"w":{"type":"string"}},
- "required":["n","w"],"additionalProperties":false}
-JSON
-ask -n -q -schema number.schema.json 'Give n as 7 and w as the word seven.'
+```sh
+git diff | ask -n 'Write a commit message.'
+go test ./... 2>&1 | ask -n 'Explain the first useful failure.'
+ask -n 'Explain compare-and-swap in two sentences.'
 ```
 
-```
-{"n":7,"w":"seven"}
-```
+If both are present, `ask` sends the instruction followed by stdin inside
+`<stdin>` delimiters. If only stdin is present, stdin is the whole message.
+Surrounding whitespace on textual stdin is removed.
 
-Each adapter translates the schema into its provider's native constrained
-output field. `ask` then parses and validates the finished document itself.
-Only a matching document reaches stdout with exit 0, so `| jq` no longer
-depends on a model obeying “ONLY JSON, no fence.”
+This is also how to provide facts the model cannot know:
 
-### 3. Remembering across separate processes
-
-This is the capability no stateless LLM CLI has, and it is the reason `ask`
-keeps a log. Six separate invocations, six separate processes, **one
-accumulating conversation**:
-
-```bash
-ask -n -q "I'll show you one Go package per message. Reply READY."
-for pkg in event provider tool agent workspace; do
-  cat ~/projects/micro-agent/internal/$pkg/*.go |
-    ask -q "Package $pkg. Reply with only its name and a 6-word purpose."
-done
-
-ask -q 'Across ALL five packages you have seen, name the one cross-package
-        coupling that would break the replay invariant if someone changed
-        it carelessly. Name the two packages and the mechanism.'
+```sh
+date -u | ask -n 'State this time in ISO 8601.'
+uname -a | ask -n 'Explain this platform string.'
 ```
 
-```
-event ↔ provider
-provider.Request.Logged stores Digest(Messages); event.Check recomputes
-provider.Digest(event.Fold(priorEvents)).
-Changing Fold semantics or Message/Block JSON serialization carelessly
-makes existing logs diverge.
-```
+Do not ask the model to open `/tmp/x`, inspect the current repository, or run
+`date`. It cannot. Let the shell do those operations and pass their results.
 
-**7 turns, 330,899 accumulated input tokens, across 6 processes.** No single
-file contains that answer. The shell loop did the map; the conversation did
-the reduce.
+## Request a machine-readable answer
 
-### 4. Generating its own falsifiable checks
+Use `-schema` when another program will consume JSON.
 
-Ask it for findings *plus a command that would prove each one*, then run
-them. This is a verification loop built out of nothing but the filter
-contract:
-
-```bash
-ask -n -q "You are auditing a macOS machine. I'll send several system views."
-ps aux                       | ask -q "System view: running processes."
-netstat -an | grep -i listen | ask -q "System view: listening sockets."
-launchctl list               | ask -q "System view: launchd jobs."
-brew outdated --verbose      | ask -q "System view: outdated packages."
-
-cat > audit.schema.json <<'JSON'
-{"type":"array","items":{"type":"object","properties":{
- "finding":{"type":"string"},"evidence":{"type":"string"},
- "severity":{"enum":["high","medium","low"]},"check":{"type":"string"}},
- "required":["finding","evidence","severity","check"],
- "additionalProperties":false}}
-JSON
-ask -q -schema audit.schema.json \
-  'Correlate everything, highest risk first.' > audit.json
-
-jq -r '.[] | "\(.severity)\t\(.finding)\t\(.check)"' audit.json |
-while IFS=$'\t' read -r sev finding check; do
-  echo "[$sev] $finding"; eval "$check" 2>&1 | head -3 | sed 's/^/  | /'
-done
-```
-
-Real output from this machine — **3 of 4 findings confirmed** by executing
-the model's own checks:
-
-```
-[medium] Privileged third-party PACE license daemon persists with launch agent
-  | root  333  /Library/PrivilegedHelperTools/licenseDaemon.app/...licenseDaemon
-  | gui/502/com.paceap.eden.licensed.agent = { active count = 0
-[low] Outdated Ollama and llama.cpp services are actively running locally
-  | llama.cpp
-  | ollama
-  | 46930
-```
-
-The fourth needed `sudo` and stayed unverified — which is the point. You get
-claims you can check, not claims you must trust.
-
-### 5. Saying "I don't know"
-
-Asked to triage a log file that turned out to be empty, it produced:
-
-```
-| No log data provided | 0 | No unified-log entries were available. | Unknown |
-```
-
-It did not invent a table. In a pipeline that runs unattended, a model that
-fabricates when the input is empty is worse than no model.
-
-### 6. Leaving evidence
-
-That audit is still on disk and still provable:
-
-```bash
-$ ask replay -check 20260801-172845-ffa4884688e883d7.jsonl
-ok: ...jsonl replays exactly (25 events)
-```
-
-25 events, 6 turns, 269,888 input tokens, 190 KB — including all **137,567
-characters of `ps aux`** exactly as they were sent. `ask replay -step N`
-reconstitutes the precise request from the fold. Six months from now you can
-prove what the machine looked like when the finding was made.
-
-### Seeing
-
-`-a` attaches a file and repeats; binary arriving on stdin attaches itself.
-Measured live against Codex:
-
-```bash
-$ screencapture -x -t png /tmp/shot.png       # 858 KB, 2560x1440
-$ ask -a /tmp/shot.png "In one sentence: what application is in the
-    foreground and what is it showing?"
-
-Terminal is in the foreground, showing a Claude Code session editing and
-testing Go attachment-handling code.
-```
-
-It read my actual screen, correctly, in 4.2 seconds. The no-flag form works
-too, because binary stdin is sniffed:
-
-```bash
-screencapture -x -t png - | ask "what is on my screen?"
-```
-
-A file's type comes from its bytes, never its name, so `-a main.go` inlines
-as text (and the log stays greppable) while `-a shot.png` attaches. What a
-provider cannot carry is refused *before* anything is logged:
-
-```
-$ ask -a clip.wav "transcribe"
-ask: /tmp/clip.wav: openai-codex does not accept audio/wav
-     (it takes application/pdf, image/*)
-```
-
-For audio and video, point `-m` at Gemini, which carries both.
-
----
-
-## Six things that are newly possible
-
-Every command below was run while writing this, against three generated
-quarterly-report PDFs with known contents, so each answer is checkable.
-
-### 1. Documents into one conversation, then a question none of them answers
-
-The accumulation trick from earlier, now with attachments. Three separate
-processes, three PDFs, one conversation:
-
-```bash
-ask -n -q "I will send one quarterly board report per message. After each,
-           reply with only the quarter and revenue. Wait for my question."
-for q in q1 q2 q3; do ask -q -a $q.pdf "Next report."; done
-
-ask -q 'Across all three quarters, name the single trend that most
-        threatens this company, with the numbers that show it. Then state
-        what you would ask the CEO. Under 60 words.'
-```
-
-```
-The biggest threat is cash deterioration: monthly burn rose from $410K to
-$505K to $640K, while runway fell from 19 to 15 to 11 months, despite
-revenue barely growing from $3.55M to $3.61M in Q3. Ask the CEO: What
-immediate plan will extend runway before fundraising becomes unavoidable?
-```
-
-It tracked three numbers across three documents that were never in context
-together until the last turn. No single file contains that answer.
-
-### 2. A folder of PDFs becomes a CSV
-
-Parallel, and keyed by index so nothing scrambles (see the gotcha above):
-
-```bash
-mkdir -p out; i=0
-for f in *.pdf; do
-  i=$((i+1))
-  ( ask -n -q -a "$f" 'Return ONE line of CSV, no header, no fence:
-quarter,revenue_musd,margin_pct,churn_pct,burn_kusd,runway_months' \
-      > "out/$(printf '%03d' $i)" ) &
-done
-wait
-{ echo "quarter,revenue_musd,margin_pct,churn_pct,burn_kusd,runway_months"
-  cat out/*; } > report.csv
-```
-
-```
-quarter  revenue_musd  margin_pct  churn_pct  burn_kusd  runway_months
-Q1 2026  3.10          61          4.2        410        19
-Q2 2026  3.55          63          5.1        505        15
-Q3 2026  3.61          58          7.4        640        11
-```
-
-Every value correct, in order. It is real data, so the shell can do
-arithmetic on what was in a PDF a moment ago:
-
-```bash
-$ tail -n +2 report.csv | awk -F, 'END {print "runway fell", 19-$6, "months"}'
-runway fell 8 months
-```
-
-### 3. A picture of a page becomes JSON, and JSON decides
-
-No OCR is installed on this machine. There does not need to be.
-
-```bash
-$ qlmanage -t -s 1400 -o . q3.pdf          # render the page to a PNG
-$ cat > shot.schema.json <<'JSON'
-{"type":"object","properties":{"quarter":{"type":"string"},
- "revenue_musd":{"type":"number"},"churn_pct":{"type":"number"},
- "runway_months":{"type":"integer"},"risk":{"type":"string"}},
- "required":["quarter","revenue_musd","churn_pct","runway_months","risk"],
- "additionalProperties":false}
-JSON
-$ ask -schema shot.schema.json -a q3.pdf.png \
-    'Extract the quarter, metrics, and principal risk.' > shot.json
-
-$ jq -r .runway_months shot.json
-11
-$ grep -o 'Runway: [0-9]* months' q3.txt     # ground truth
-Runway: 11 months
-
-$ [ "$(jq -r .runway_months shot.json)" -lt 12 ] && echo "escalate"
-escalate
-```
-
-Pixels in, a shell branch out. That is the whole pattern: `ask` never acts —
-it turns something unreadable into something `jq` can test.
-
-### 4. Two images, and what changed between them
-
-```bash
-$ ask -a q1.png -a q3.png 'These are the same report two quarters apart,
-    in order. List ONLY the metrics that moved, one per line, as:
-    metric: before -> after (direction).'
-
-Revenue: $3.10M -> $3.61M (up)
-Gross margin: 61% -> 58% (down)
-Net new logos: 14 -> 6 (down)
-Churn: 4.2% -> 7.4% (up)
-Headcount: 41 -> 52 (up)
-Burn: $410K/mo -> $640K/mo (up)
-Runway: 19 months -> 11 months (down)
-```
-
-Every row correct, and in the order given — which is why `-a` order is
-preserved rather than sorted. Point it at two screenshots of a UI instead
-and it is a visual regression check.
-
-### 5. Ask about part of the screen
-
-`screencapture` takes a region, so you never have to send the whole display:
-
-```bash
-screencapture -x -R0,0,900,300 -t png /tmp/region.png
-ask -a /tmp/region.png "what kind of content is this?"
-```
-
-`-i` instead of `-R` lets you drag the region with the mouse.
-
-### 6. The clipboard, which is the one you will actually use
-
-Press ⌃⇧⌘4, drag a box round anything on screen — an error dialog, a chart
-in someone's slide deck, a stack trace in a screenshot someone sent you —
-then:
-
-```bash
-askclip "what is this error and how do I fix it?"
-```
-
-```bash
-askclip() {
-  local f=$(mktemp -t askclip).png
-  osascript -e "set f to (open for access POSIX file \"$f\" with write permission)" \
-            -e 'write (the clipboard as «class PNGf») to f' \
-            -e 'close access f' 2>/dev/null \
-    || { echo "no image on the clipboard" >&2; return 1; }
-  ask -a "$f" "$@"; local r=$?; rm -f "$f"; return $r
+```sh
+cat > finding.schema.json <<'JSON'
+{
+  "type": "object",
+  "properties": {
+    "found": {"type": "boolean"},
+    "reason": {"type": "string"}
+  },
+  "required": ["found", "reason"],
+  "additionalProperties": false
 }
+JSON
+
+ask -n -q -schema finding.schema.json \
+  'Does this log show an out-of-memory failure?' < kernel.log |
+  jq -e '.found'
 ```
 
-Verified both ways: with a screenshot on the clipboard it answers; with text
-on the clipboard it says `no image on the clipboard` and exits 1, so a
-script can tell.
+The provider receives its native structured-output parameter. After the turn,
+`ask` parses the text and validates the value against the same schema before
+exit 0.
 
----
+A refusal, invalid JSON, schema mismatch, or incomplete provider stop exits 1
+without emitting a normal answer. The completed provider turn remains in the
+log. `-json` is different by request: it emits the raw events even when the
+structured answer is rejected.
 
-## What it is not good at
+The schema is limited to 1 MB and must be one JSON object. Local fragment
+references work. External references do not. With `-schema -`, stdin contains
+the schema, so put the question in argv.
 
-Measured, not theorised. Each of these was tested.
+## Attach files
 
-| Limit | What actually happens | What to do |
-| --- | --- | --- |
-| **No filesystem** | *"I can't access /tmp/secret.txt or read files from your filesystem."* | `cat file \| ask ...` |
-| **No commands** | *"I can't run commands or access this machine."* | `uname -a \| ask ...` |
-| ~~No vision~~ | Fixed: `-a photo.png`, or pipe binary in | see Attachments |
-| **No clock** | Asked the date, answered **"March 26, 2026"** — confidently wrong, on 1 August | `date \| ask ...` |
-| **No timeout** | 6 retries with escalating backoff; a flaky connection blocked for **minutes** | see below |
-| **Context ceiling** | ~1.2 MB fine; 6 MB never returned | rolling digest, below |
-| **No cost on Codex** | subscription auth reports no price | use OpenRouter if you need dollars |
+Use `-a` for a regular file:
 
-### The clock one will bite you
-
-```bash
-$ ask -n -q "What is today's date? If you cannot know, say so."
-Today is March 26, 2026.          # ← it was 1 August 2026
+```sh
+ask -n -a chart.png 'State the trend.'
+ask -n -a old.pdf -a new.pdf 'List the changed claims.'
 ```
 
-It refuses file access honestly. It does **not** refuse the date. Any prompt
-whose answer depends on *now* must be handed the time:
+The order of `-a` flags is preserved. Type is determined from content:
 
-```bash
-$ date | ask -n -q "Today's date is in stdin. What is it, and what day?"
-August 1, 2026 — Saturday
+- Recognized media becomes an attachment.
+- Valid UTF-8 without NUL bytes becomes labelled text.
+- Other bytes are refused.
+
+Binary stdin is treated as one attachment:
+
+```sh
+screencapture -x -t png - | ask -n 'Describe this image.'
 ```
 
-### There is no timeout, and macOS has no `timeout`
+Provider families differ:
 
-Neither `timeout` nor `gtimeout` exists on a stock Mac. When the connection
-to the provider went flaky, `ask` retried six times with escalating backoff
-and blocked for over two minutes. Bound it yourself:
+| provider | media |
+| --- | --- |
+| Anthropic | images, PDF |
+| OpenAI and OpenAI Codex | images, PDF |
+| Gemini | images, audio, video, PDF |
+| OpenRouter | images, PDF, WAV, MP3 |
 
-```bash
-# a portable hard bound, no coreutils required
-ask_t() { ( "$@" & p=$!; ( sleep "${ASK_TIMEOUT:-60}"; kill -9 $p 2>/dev/null ) & k=$!
-            wait $p; r=$?; kill $k 2>/dev/null; return $r ) }
+The check is per provider, not per model. A model can support less.
 
-ask_t ask -q "..." < big.txt || echo "gave up"
-```
+Files are read whole. `-a` accepts at most 16 files, 16 MB each and 32 MB in
+total. Stdin has its own 16 MB limit. Too much input is an error, never a
+partial message.
 
-Or `brew install coreutils` and use `gtimeout 60 ask ...`.
+## Let the shell make the decision
 
-When it *does* stall, the log tells you why — that is what the log is for:
+Exit 0 means the model answered. It does not mean the answer was “yes.” Test
+the answer itself.
 
-```bash
-$ jq -c 'select(.type=="retry").data' ~/.ask/sessions/current
-{"attempt":1,"status":0,"wait_ms":1425,"error":"..."}
-{"attempt":2,"status":0,"wait_ms":4035,"error":"..."}
-```
+For prose:
 
-`status: 0` means the request never reached an HTTP response at all.
-
----
-
-## The three gotchas that cost me the most time
-
-### 1. Parallel fan-out silently scrambles your answers
-
-`xargs -P` returns results in **completion** order, not input order. This
-looks like it works and is wrong:
-
-```bash
-cat questions.txt | xargs -P8 -I{} sh -c 'ask -n -q "{}"'
-```
-
-```
-capital of Peru | 1970                      ← wrong
-author of the C programming language | Homebrew   ← wrong
-```
-
-Carry the key through, or key the output by index:
-
-```bash
-mkdir -p out; i=0
-while IFS= read -r q; do
-  i=$((i+1))
-  ( printf '%s\t%s\n' "$q" "$(ask -n -q "Answer briefly: $q")" \
-      > "out/$(printf '%03d' $i)" ) &
-done < questions.txt
-wait; cat out/*
-```
-
-```
-capital of Peru                     Lima
-author of the C programming language Dennis Ritchie
-what signal is 9                    SIGKILL
-```
-
-**8 questions in 5 seconds**, correctly attached.
-
-### 2. Parallel means `-n` (or `-f`), always
-
-One writer per session, enforced by a lock. Concurrent `ask` calls without
-`-n` will refuse each other by name — correctly, because interleaving two
-conversations into one log would break every digest after the first. Use
-`-n` for independent questions, `-f thread.jsonl` for a named thread.
-
-### 3. `ask` continues by default
-
-`ask "..."` joins the current conversation. That is the feature, but in a
-script it means run #2 inherits run #1's context. It always says so on
-stderr:
-
-```
-ask: 20260801-172603-6c97... · 1 turns so far (-n starts fresh)
-```
-
-In any pipeline that should be stateless, pass `-n`.
-
----
-
-## Recipes worth stealing
-
-Everything below was run.
-
-### Beat the context ceiling: the rolling digest
-
-For a corpus larger than any window, carry a fixed-size state forward. This
-digested **1.4 MB of `git log -p`** through a bounded context:
-
-```bash
-git log -p --no-color > history.txt        # 1.7 MB
-split -b 350000 history.txt chunk.
-: > state.md
-for c in chunk.*; do
-  { echo "=== RUNNING NOTES ==="; cat state.md
-    echo "=== NEW CHUNK ==="; cat "$c"; } |
-  ask -n -q 'Update the running notes with anything new in this chunk.
-             Output ONLY the updated notes: at most 10 bullet lines, each a
-             distinct theme. Merge related items; do not append blindly.' \
-    > state.next && mv state.next state.md
-done
-cat state.md
-```
-
-A real line out of the result, which no single chunk contained:
-
-> Removed `mu serve` and its embedded web surface; append-only JSONL logs,
-> `mu replay`, sidecar notes and machine-readable event streams remain the
-> external viewing and steering interface.
-
-`-n` on each chunk is deliberate: state lives in `state.md`, not in the
-conversation, so memory is bounded no matter how long the corpus is.
-
-### The clipboard as universal I/O
-
-The single highest-value macOS one-liner. Works with any app on the system.
-
-```bash
-pbpaste | ask -n -q "Fix grammar. Output only the corrected sentence." | pbcopy
-```
-
-```
-in:  we was gonna go to the store but it was closed so we went home
-out: We were going to go to the store, but it was closed, so we went home.
-```
-
-Bind it to a hotkey with Automator → Quick Action → Run Shell Script, and
-you have system-wide LLM text transformation in every text field on the Mac.
-
-### Commit messages from the diff
-
-```bash
-git diff --staged | ask -n -q "Write a git commit message: a 50-char
-  subject, blank line, then why (not what). No fences." | git commit -F -
-```
-
-### Speak the answer, and notify when a long job lands
-
-```bash
-ask -n -q "Summarise in one sentence" < report.txt | tee /tmp/a.txt
-say -v Samantha "$(cat /tmp/a.txt)"
-osascript -e 'display notification "ask: done" with title "asklab"'
-```
-
-Both verified working.
-
-### Branch a script on a judgement
-
-The exit code is the point. `ask` answers, the shell decides:
-
-```bash
-if git diff --staged | ask -q "Does this diff touch authentication or
-     crypto? Answer yes or no." | grep -qi '^yes'; then
-  echo "security-sensitive — requesting review" >&2
+```sh
+if git diff --staged |
+   ask -n -q 'Does this change authentication? Answer yes or no.' |
+   grep -Eiq '^yes$'; then
+  echo 'security review required'
 fi
 ```
 
-### Exit 2 means stop, not retry
+For automation, structured JSON is safer:
 
-The one exit code worth branching on explicitly. A full context window fails
-identically forever, so a supervisor must not retry it:
-
-```bash
-ask -q "..." < huge.log
-case $? in
-  0) : ;;
-  2) echo "context full — starting fresh"; ask -n -q "..." < huge.log ;;
-  *) echo "transient — retrying"; sleep 5; ask -q "..." < huge.log ;;
-esac
+```sh
+if ask -n -q -schema finding.schema.json \
+     'Does this change authentication?' < patch.json |
+   jq -e '.found' >/dev/null; then
+  echo 'security review required'
+fi
 ```
 
-### Extend the system prompt instead of replacing it
+Model output is untrusted input. Do not pipe it into `sh` or `eval` unless
+you have chosen to execute untrusted text.
 
-The default is a value, so composing is ordinary shell:
+## Run independent work in parallel
 
-```bash
-ask -S "$(ask system; cat ~/.ask/house-style.md)" "draft the release note"
+Parallel calls must not share the current session. Output also needs a key;
+parallel processes finish out of order.
+
+```sh
+mkdir -p out
+i=0
+for file in *.go; do
+  i=$((i + 1))
+  key=$(printf '%03d' "$i")
+  (ask -n -q "Review $file in five lines." < "$file" > "out/$key") &
+done
+wait
+cat out/*
 ```
 
-`ask system` prints the built-in prompt — 231 words written for a model
-whose output is about to be read by a program. Its most important rule is
-one most chat prompts get wrong: *you cannot ask a clarifying question,
-because nothing is listening on stdin.* Ambiguity gets the most useful
-reading plus a stated assumption, never a question mark and an empty pipe.
+`-n` gives each call its own session. Numbered files restore input order.
 
-### Audit your own usage
+## Handle limits and retries
 
-```bash
-jq -s 'map(select(.type=="assistant").data.usage.in) | add' ~/.ask/sessions/*.jsonl
-for f in ~/.ask/sessions/*.jsonl; do ask replay -check "$f" >/dev/null || echo "BAD $f"; done
+`ask` retries retryable provider failures up to six attempts. Retry waits and
+causes are recorded in the session. Model streams have no overall deadline;
+use the operating system's `timeout` command, or `gtimeout` from GNU
+coreutils on macOS, when a caller needs one.
+
+Exit 2 has one meaning: a model context window is full. For an ask turn, do
+not retry the same session. Either start over:
+
+```sh
+ask -n 'Restate the task with only the needed input.'
 ```
 
----
+or compact the session:
 
-## The demonstration that convinced me
-
-I piped `ask`'s own complete source — 107 KB — into `ask`, and asked for the
-single most likely latent bug:
-
-```bash
-{ for f in $(git ls-files '*.go' | grep -v _test); do
-    echo "===== $f ====="; cat $f; done; } |
-  ask -n -q -effort high 'Find the single most likely LATENT BUG — wrong
-    now, will bite a real user. Output only: FILE / CLAIM / WHY / REPRO.'
+```sh
+new=$(ask compact)
+ask -f "$new" 'Continue with the next case.'
 ```
 
+Compaction is explicit because a model decides what the handoff retains. The
+source is unchanged. The summarizer call has its own session, and the new
+session names both its parent and summarizer.
+
+## Inspect the record
+
+Use replay for four different questions:
+
+```sh
+ask replay                 # What happened?
+ask replay -json           # What events are stored?
+ask replay -check          # Does every request match its preceding fold?
+ask replay -step 4         # What normalized request was made at seq 4?
 ```
-FILE: main.go
-CLAIM: The -q flag silently discards a successful answer whenever stdout
-       and stderr refer to the same terminal, file, or pipe.
-WHY:   With -q, cmdAsk installs no renderer, so the answer is never
-       streamed to stderr. finish still suppresses its stdout write when
-       sameOut returns true, incorrectly assuming the renderer already
-       emitted the answer.
-REPRO: tmp=$(mktemp); ask -q -n 'Print exactly: visible' >"$tmp" 2>&1; ...
+
+`-check` is stronger than “the JSON parses.” For every request event, it
+folds all preceding user and complete assistant events and compares that
+conversation with the recorded digest.
+
+Use `note` for an attributed fact that belongs in the record but should not
+become model context:
+
+```sh
+go test ./... >/tmp/test.out 2>&1
+status=$?
+ask note -s test "exit $status"
 ```
 
-It was right. `ask -q "question"` typed in a terminal — where both streams
-are the tty — printed **nothing at all** and exited 0. The existing test
-missed it because it used two separate temp files, which is the one case
-that cannot reproduce it.
+A note has no model call and is not folded. `-s` is required so the record
+says who wrote it.
 
-The bug is fixed (`cb45b9f`) and the regression test now covers both cases.
-A tool that finds a severe bug in its own source, names the mechanism, and
-hands you a working repro is doing real work.
+## Control the system prompt
 
-Two other bugs were found the same way while writing this guide: the OpenAI
-SDK swallowing error bodies it does not recognise — which also broke
-context-overflow detection, and so the exit code — and retry events that
-recorded `status: 0` without saying why.
+Print the built-in value with `ask system`:
 
----
+```sh
+ask -S "$(ask system; cat project-style.md)" 'Draft the release note.'
+ask -S '' 'Answer with no system prompt.'
+```
+
+Precedence is simple:
+
+1. Explicit `-S`, including `-S ''`.
+2. `$ASK_SYSTEM`.
+3. The built-in prompt.
+
+The choice is made again on every invocation. A one-time `-S` does not become
+the default for later turns; export `ASK_SYSTEM` or pass `-S` again when it
+must remain in force. The session header records the creation prompt, and each
+request records the prompt used for that call.
+
+## Keep sessions usable
+
+Sessions contain the resulting user messages and the bytes of every media
+attachment. Treat them like their inputs. Useful maintenance commands are:
+
+```sh
+for file in ~/.ask/sessions/*.jsonl; do
+  ask replay -check "$file" >/dev/null || echo "bad: $file"
+done
+
+cp ~/.ask/sessions/SESSION.jsonl experiment.jsonl
+ask -f experiment.jsonl 'Try the other assumption.'
+```
+
+Copying is the exact branch operation because a session is self-contained.
 
 ## Reference card
 
+```text
+ask 'question'                  continue the current conversation
+ask -n 'question'               start a new conversation
+ask -f thread.jsonl 'question'  use a named conversation
+command | ask 'instruction'     combine evidence and instruction
+ask -a file 'instruction'       attach a file; repeat -a as needed
+ask -schema schema.json 'task'  require validated JSON
+
+ask replay                     render the current session
+ask replay -check              verify request digests
+ask replay -step N             reconstruct one normalized request
+ask compact                    continue from a model-written handoff
+ask note -s source 'text'      append a record, not a message
+
+-q          suppress progress on stderr; errors still print
+-json       emit raw events instead of the normal answer
+-effort     off, low, medium, or high; mapping varies by provider
+-max-tokens maximum output tokens; default 16384; not sent to openai-codex
+-m          provider/model
+
+exit 0  success
+exit 1  error
+exit 2  context window full
+exit 130 interrupted
 ```
-ask "question"              continue the current conversation
-ask -n "question"           start a fresh one          ← use in scripts
-ask -f t.jsonl "question"   a named thread of your own
-cmd | ask "instruction"     stdin is evidence, argv is the instruction
-cmd | ask                   stdin alone is the whole question
-ask -a f.png "question"     attach a file; repeat -a for more
-cmd | ask "question"        binary on stdin attaches itself
-ask -schema s.json "task"   native structured output, locally validated
-
--q          answer only, no progress on stderr
--json       raw event stream on stdout instead of the answer
--S text     replace the system prompt   (ask system prints the default)
--effort     off | low | medium | high
--m spec     provider/model               ($ASK_MODEL)
-
-ask replay            re-render the current session
-ask replay -check     prove it replays exactly
-ask replay -step N    the exact request sent at seq N
-
-exit 0 answered · 1 error · 2 context window full · 130 interrupted
-stdout = answer · stderr = progress · ~/.ask/sessions/ = the record
-```
-
-**Rules of thumb**
-
-- Anything time-dependent: pipe `date` in.
-- Anything in a script: `-n`.
-- Anything parallel: `-n`, and key the output by index.
-- Anything unattended: bound it with a timeout and branch on exit 2.
-- Anything you might have to defend later: it is already in the log.
-- Anything visual: `-a` it, or pipe it — but check the provider carries it.

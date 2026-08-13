@@ -826,8 +826,8 @@ func TestJSONEmitsEventsNotProse(t *testing.T) {
 	}
 }
 
-// TestQuietSilencesStderr: -q leaves only the answer.
-func TestQuietSilencesStderr(t *testing.T) {
+// TestQuietSuppressesProgress: on success, -q leaves only the answer.
+func TestQuietSuppressesProgress(t *testing.T) {
 	fake(t, 200, answerWire)
 	code, stdout, stderr := exec(t, "", "-q", "hi")
 	if code != 0 {
@@ -1028,7 +1028,11 @@ func TestDocsCoverEveryFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	man := strings.ReplaceAll(string(raw), `\`, "")
-	for _, f := range []string{"-m", "-S", "-n", "-a", "-f", "-d", "-effort", "-max-tokens", "-schema", "-json", "-q", "-check", "-step"} {
+	for _, f := range []string{
+		"-m", "-S", "-n", "-a", "-f", "-d", "-effort", "-max-tokens",
+		"-schema", "-json", "-q", "-check", "-step", "-s", "-from-codex",
+		"-access-token", "-refresh-token", "-token-url", "-client-id", "-scope", "-expires",
+	} {
 		if !strings.Contains(usageText, f+" ") && !strings.Contains(usageText, f+"\n") {
 			t.Errorf("flag %s is missing from ask help", f)
 		}
@@ -1108,8 +1112,11 @@ func TestEnvVarsAreDocumented(t *testing.T) {
 	}
 	for _, v := range []string{
 		"ASK_MODEL", "ASK_SYSTEM", "ASK_DIR", "ASK_AUTH_FILE", "ASK_AUTH_URL",
+		"ASK_AUTH_CLIENT_ID", "ASK_AUTH_CLIENT_SECRET", "ASK_AUTH_REFRESH_TOKEN", "ASK_AUTH_SCOPE",
 		"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY",
-		"ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION", "NO_COLOR",
+		"ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "OPENAI_CODEX_BASE_URL", "GEMINI_BASE_URL", "OPENROUTER_BASE_URL",
+		"ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_BASE_URL",
+		"CODEX_HOME", "NO_COLOR",
 	} {
 		if !strings.Contains(string(man), v) {
 			t.Errorf("%s is not documented in ask.1", v)

@@ -1,24 +1,6 @@
-// A note is something a program recorded about a run.
-//
-// ask's rule is that text nobody typed is admissible in a session only if
-// it is stamped, and `ask note` is that rule as a verb rather than an
-// exception to it: -s is required, so there is no way to write an
-// unattributed note. It makes no model call, so there is no request event,
-// no cost, and nothing new to replay.
-//
-// What it is for is the verdict. `ply` decides whether work is done by
-// running a command, and that verdict lived only on stderr and in an exit
-// status — so a session recorded everything that was tried and nothing
-// about whether it worked, and a passing run and a failing one were
-// byte-for-byte the same shape. ask already states the principle in
-// DoneData: what stopped a turn belongs "in the log rather than only in the
-// exit code, so a session read later says how it finished". A note is that
-// sentence, available to the program that owns the outcome.
-//
-// It is not folded. A failing check is a user message because the model has
-// to act on it; a passing check is addressed to nobody, because the run is
-// over. Record, not message — so the conversation a provider sees is
-// exactly what it was before, and every digest ever written still matches.
+// A note is an attributed record, not a message. It makes no model call and
+// is not folded, so it cannot change the conversation or any request digest.
+// The required -s value says which program wrote it.
 package main
 
 import (
@@ -38,7 +20,7 @@ func cmdNote(args []string) int {
 		dir    = fs.String("d", askDir(), "conversation directory")
 		file   = fs.String("f", "", "session file (default: the current conversation)")
 		source = fs.String("s", "", "the program recording it (required)")
-		quiet  = fs.Bool("q", false, "no progress on stderr")
+		quiet  = fs.Bool("q", false, "no progress on stderr; errors still print")
 	)
 	usage(fs, "ask note -s source [flags] [text ...]")
 	if err := fs.Parse(args); err != nil {

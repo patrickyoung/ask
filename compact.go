@@ -49,7 +49,7 @@ func cmdCompact(args []string) int {
 	var (
 		dir   = fs.String("d", askDir(), "conversation directory")
 		mspec = fs.String("m", "", "summarizer provider/model")
-		quiet = fs.Bool("q", false, "no progress on stderr")
+		quiet = fs.Bool("q", false, "no progress on stderr; errors still print")
 	)
 	usage(fs, "ask compact [flags] [session]")
 	if err := fs.Parse(args); err != nil {
@@ -173,8 +173,8 @@ func summarize(ctx context.Context, dir string, prov provider.Provider, model, s
 // Reasoning is left out. It is the largest part of a modern session and
 // the least transferable — provider-opaque, addressed to a turn that is
 // over — and leaving it out is also most of why a transcript fits where
-// the conversation it came from did not. Attachments are named, not
-// carried: a note about a photograph is not a photograph.
+// the conversation it came from did not. Attachments are represented by
+// media type, not carried: a note about a photograph is not a photograph.
 func transcript(events []event.Event) string {
 	var b strings.Builder
 	for _, e := range events {

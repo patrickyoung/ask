@@ -1,485 +1,331 @@
 # ask
 
-Put a question through a language model. Get the answer on stdout.
+`ask` puts one question through a language model and writes the answer to
+standard output.
 
-```
-$ ask what is the airspeed velocity of an unladen swallow
-About 11 m/s for a European swallow in level cruising flight.
-
-$ git diff | ask "write a commit message"
-Fix off-by-one in the ring buffer wrap
-
-$ ask "does this log show an OOM?" -q < kern.log && echo "yes it does"
+```sh
+ask 'What does this error mean?' < build.log
+git diff | ask -n 'Write a commit message.'
+ask -n -a chart.png 'What changed?'
 ```
 
-It is a filter, and it behaves like one: the answer is stdout, progress is
-stderr, and the exit status says what happened. It has no tools, no agent
-loop, and nothing to configure. The model answers, and the answer is the
-product.
+It is a Unix filter:
 
-What it does have is a log you can trust. Every run appends to an
-append-only JSONL session file, and the conversation sent to the model is a
-pure function of that file — provably, on demand:
+| result | meaning |
+| --- | --- |
+| stdout | the answer only |
+| stderr | progress and errors: streamed output, reasoning, retries, and usage |
+| exit 0 | the command completed successfully |
+| exit 1 | an error occurred |
+| exit 2 | a model context window is full |
+| exit 130 | the run was interrupted |
 
-```
-$ ask replay -check
-ok: 20260801-142233-a3f9c1e0.jsonl replays exactly (11 events)
-```
+`-q` suppresses progress, not errors. `-json` replaces the normal answer with
+the raw events written by that invocation.
 
 ## Install
 
-```
+`ask` requires Go 1.26 or newer and a Unix system: Linux, macOS, BSD, or WSL.
+
+```sh
 go install github.com/patrickyoung/ask@latest
-export ASK_MODEL=anthropic/claude-sonnet-5
+export ASK_MODEL=anthropic/your-model
 export ANTHROPIC_API_KEY=...
 ```
 
-Go 1.26 or newer, and a Unix: Linux, macOS, or BSD. `ask` opens attachments
-non-blocking so a fifo is refused rather than waited on, and locks a session
-with `flock(2)` so a crashed writer strands nothing — neither has a Windows
-spelling, and pretending otherwise would be a worse answer than saying so.
-WSL works.
+The model syntax is `provider/model`. The supported providers are:
 
-Five providers, one flag: `anthropic`, `openai`, `openai-codex`, `gemini`,
-`openrouter`. Models are `provider/model`, and OpenRouter models keep their
-own slash (`openrouter/anthropic/claude-sonnet-4.5`).
+- `anthropic`
+- `openai`
+- `openai-codex`
+- `gemini`
+- `openrouter`
 
-On a ChatGPT subscription, import the Codex CLI's credentials instead of
-setting a key — and use the model that account is actually entitled to, or
-the API says so and nothing works:
+OpenRouter model names retain their slash, for example
+`openrouter/anthropic/your-model`.
 
-```
+`openai-codex` uses a ChatGPT subscription login instead of an API key:
+
+```sh
 ask login openai-codex -from-codex
-export ASK_MODEL=openai-codex/$(awk -F'"' '/^model/{print $2}' ~/.codex/config.toml)
+ask auth
+```
+
+The import reads the official Codex CLI login. Use a model available to that
+account.
+
+## Input
+
+Arguments form the instruction. Standard input supplies the data:
+
+```sh
+ask 'Explain mutexes in one paragraph.'
+go test ./... 2>&1 | ask -n 'Find the first useful failure.'
+```
+
+With both, `ask` sends the argument text followed by stdin inside `<stdin>`
+delimiters. With stdin alone, stdin is the whole message. Surrounding
+whitespace on textual stdin is removed.
+
+Anything that is not a command is treated as a message. A word one edit away
+from a command is refused as a likely typo. `--` forces it to be a message:
+
+```sh
+ask -- replay
+```
+
+`ask` cannot read a path named in a prompt or run a command. Use the shell to
+produce the input, or attach the file.
+
+## Conversations
+
+A plain invocation continues the current conversation:
+
+```sh
+ask 'What is a monad?'
+ask 'Show one Go example.'       # continues
+ask -n 'Start an unrelated task.'
+```
+
+Use `-n` for a new session. Use `-f` for an explicitly named session,
+including one outside the normal conversation directory:
+
+```sh
+ask -f review.jsonl 'Review this patch.' < patch.diff
+ask -f review.jsonl 'List the remaining risks.'
+```
+
+Sessions normally live in `~/.ask/sessions` or `$ASK_DIR`. The `current`
+symlink names the session a plain `ask` continues. A session named with `-f`
+does not change `current` unless that file itself lives in the conversation
+directory.
+
+Only one process may write a session at a time. The lock is an `flock(2)` on
+the session file and is released by the kernel when the process exits.
+
+If a conversation fills the context window, `ask` exits 2. Repeating the same
+request cannot fix that conversation. Start fresh with `-n`, or compact it:
+
+```sh
+ask compact
+```
+
+Compaction creates two new files. One records the summarizer call. The other
+starts a new conversation from the resulting handoff note. The source session
+is not changed. The new message is stamped `source: "summary"`, and its header
+names the original session and the summarizer session.
+
+To branch without summarizing, copy the session file and use `-f`:
+
+```sh
+cp ~/.ask/sessions/SESSION.jsonl what-if.jsonl
+ask -f what-if.jsonl 'Assume the other design was chosen.'
 ```
 
 ## Structured JSON
 
-`-schema` makes JSON an API contract, not a prompt-writing exercise. Give it
-a self-contained JSON Schema and ask for the information you want:
+`-schema` makes the output shape part of the provider request:
 
-```bash
-cat > runway.schema.json <<'JSON'
+```sh
+cat > result.schema.json <<'JSON'
 {
   "type": "object",
-  "properties": {"runway_months": {"type": "integer"}},
-  "required": ["runway_months"],
+  "properties": {"severity": {"enum": ["low", "medium", "high"]}},
+  "required": ["severity"],
   "additionalProperties": false
 }
 JSON
 
-ask -schema runway.schema.json -a report.pdf.png \
-  "Extract the remaining runway." | jq -r .runway_months
+ask -schema result.schema.json 'Classify this alert.' < alert.txt |
+  jq -r .severity
 ```
 
-The schema goes through each provider's native structured-output field; it
-is not copied into the system or user prompt. The completed answer is parsed
-and validated locally before `ask` exits 0. Invalid JSON, a schema mismatch,
-a refusal, or output cut off at the token limit exits 1 and leaves stdout
-without an answer, so the next program in a pipe cannot accept a broken
-document. With `-json`, stdout still carries the requested raw event stream.
-The provider turn and the schema remain in the append-only log.
+The schema is sent through each provider's native structured-output field.
+It is not inserted into the system prompt or user message. `ask` then parses
+the completed document and validates it locally.
 
-Schemas are limited to 1 MB and must carry their definitions in one file;
-fragment references such as `#/$defs/item` work, external references do not.
-`-schema -` reads the schema from stdin when the question is in argv. Native
-support is model-dependent; an unsupported model fails at the provider
-instead of falling back to “please output JSON” prompting. OpenRouter is told
-to route only to endpoints that accept the structured-output parameters.
+In normal answer mode, invalid JSON, a schema mismatch, a refusal, or an
+incomplete provider stop exits 1 and emits no answer on stdout. The provider
+turn remains in the append-only log. With `-json`, stdout still contains the
+raw events requested by the caller.
 
-**[GUIDE.md](GUIDE.md)** is the field guide: what `ask` is good at, what it
-is not, and the recipes — measured against a real Codex account, including
-the three things that will bite you (no clock, no timeout, and `xargs -P`
-silently scrambling parallel answers).
+Schemas must be JSON objects no larger than 1 MB. Fragment references within
+the document work. External references are refused. `-schema -` reads the
+schema from stdin, so the question must then come from the arguments.
+
+Native structured output is model-dependent. An unsupported model fails at
+the provider; `ask` does not fall back to prompt instructions. OpenRouter is
+required to choose an endpoint that accepts the structured-output parameters.
 
 ## Attachments
 
-`-a` takes a file, and repeats:
+`-a` attaches a regular file and may be repeated:
 
+```sh
+ask -a chart.png 'Describe the trend.'
+ask -a q3.pdf -a q4.pdf 'What changed?'
+screencapture -x -t png - | ask 'What is on this screen?'
 ```
-$ ask -a chart.png "what is the trend?"
-$ ask -a q3.pdf -a q4.pdf "what changed between these quarters?"
-$ screencapture -x -t png - | ask "what is on my screen?"
-```
 
-What a file *is* comes from reading it, never from its name. Bytes with a
-known signature are that type; anything else that is valid UTF-8 without
-NULs is text; anything else is refused by name before it is sent. So a
-`.png` holding a shell script is a shell script, and `-a main.go` is `cat
-main.go` with a label — text inlines, so the log stays greppable.
+The type comes from the bytes, not the filename. Recognized media is attached.
+Valid UTF-8 without NUL bytes is inlined as labelled text. Other data is
+refused before a session file is created. A directory, device, socket, or FIFO
+is also refused; attachment files are opened non-blocking.
+Empty files are refused. `-a -` is not supported; pipe stdin instead.
 
-| provider | carries |
+| provider | accepted attachment families |
 | --- | --- |
-| anthropic | images, PDF |
-| openai, openai-codex | images, PDF |
-| gemini | images, audio, video, PDF |
-| openrouter | images, PDF, WAV, MP3 |
+| `anthropic` | images, PDF |
+| `openai` | images, PDF |
+| `openai-codex` | images, PDF |
+| `gemini` | images, audio, video, PDF |
+| `openrouter` | images, PDF, WAV, MP3 |
 
-Anything a provider can't carry is refused *before* the session log is
-touched, naming the provider and what it does take — a message that could
-never be sent must not become an event that every later fold rebuilds.
+The table is per provider. A particular model may support less and can still
+reject the request.
 
-The bytes live in the log. A photo makes a large record; in exchange the
-session stays one self-contained file that still replays exactly, and
-copying it copies everything it means. Limits are fixed at 16 attachments,
-16 MB each, 32 MB per message. Piped input is bounded by the same 16 MB, and
-crossing it is an error rather than a truncation — an answer about the first
-part of a file, presented as an answer about the file, is not something the
-next program in the pipe can detect. Session files are mode 0600.
+Limits are fixed:
 
-Three things this makes possible, all run against PDFs with known contents:
+- 16 files supplied with `-a`
+- 16 MB per `-a` file
+- 32 MB total across `-a` files
+- 16 MB on stdin
 
-```bash
-# a picture of a page becomes validated JSON. No OCR installed.
-qlmanage -t -s 1400 -o . report.pdf
-ask -schema runway.schema.json -a report.pdf.png \
-  'Extract the remaining runway.' > r.json
-[ "$(jq -r .runway_months r.json)" -lt 12 ] && echo escalate
-
-# two images, and what changed — point it at UI screenshots for a
-# visual regression check
-ask -a q1.png -a q3.png 'Same report, two quarters apart, in order.
-  List ONLY the metrics that moved: metric: before -> after (direction).'
-
-# documents accumulate across processes, like everything else
-for q in q1 q2 q3; do ask -q -a $q.pdf "Next report."; done
-ask -q 'Across all three, name the trend that most threatens this company.'
-#> burn rose $410K -> $505K -> $640K while runway fell 19 -> 15 -> 11 months
-```
-
-That last one is the combination worth understanding: attachments ride the
-same accumulating conversation everything else does, so three documents
-that were never in context together can still be compared in one question.
-
-The one you will actually use is the clipboard. Press ⌃⇧⌘4, drag a box
-round an error dialog or a chart in someone's slide deck, then:
-
-```bash
-askclip() {
-  local f=$(mktemp -t askclip).png
-  osascript -e "set f to (open for access POSIX file \"$f\" with write permission)" \
-            -e 'write (the clipboard as «class PNGf») to f' \
-            -e 'close access f' 2>/dev/null \
-    || { echo "no image on the clipboard" >&2; return 1; }
-  ask -a "$f" "$@"; local r=$?; rm -f "$f"; return $r
-}
-
-askclip "what is this error and how do I fix it?"
-```
-
-[GUIDE.md](GUIDE.md) has all six worked through with their real output.
-
-## The Unix contract
-
-| stream | carries |
-| --- | --- |
-| stdout | the answer, and nothing else |
-| stderr | streamed text, reasoning, retries, token counts |
-| exit 0 | answered |
-| exit 1 | error — bad usage, missing key, provider failure, no text |
-| exit 2 | context window full (permanent: start a new conversation) |
-| exit 130 | interrupted |
-
-Reasoning never touches stdout. `2>/dev/null` leaves the answer alone.
-`-q` silences stderr entirely. When stdout and stderr are the same
-terminal, the answer is not printed twice.
-
-Exit 2 is worth its own row. A full context window fails identically
-forever, so a supervisor loop has to be able to tell it from a rate limit —
-otherwise it retries a permanent error until someone notices the bill.
-
-## Conversations
-
-Each run continues the current conversation, so `ask` remembers:
-
-```
-$ ask "what is a monad"
-$ ask "give me an example"        # continues
-$ ask -n "unrelated question"     # starts fresh
-```
-
-Because that is the default, a pipeline inherits whatever was asked before
-it. Every continuing run says so on stderr — which session, how many turns
-— so it is never a silent surprise. Use `-n` when you want a clean slate,
-or `-f` to keep a thread in a file of your own:
-
-```
-$ ask -f review.jsonl "review this diff" < patch
-$ ask -f review.jsonl "now summarize the risks"
-$ ask replay -check review.jsonl
-```
-
-A conversation that fills the window is exit 2, and stays exit 2 forever —
-that is the whole point of giving it its own status. `ask compact` is the
-way on:
-
-```
-$ ask "and what about the third case?"
-ask: context window is full
-$ ask compact
-ask: summarizing 33853 bytes with anthropic/claude-sonnet-5
-ask: compacted 20260801-190338-c0aacdcb → 20260802-002839-86d69eae (note by
-     20260802-002816-a7661b95, 3220 bytes from 33853)
-~/.ask/sessions/20260802-002839-86d69eae.jsonl
-$ ask "and what about the third case?"     # continues, in the new one
-```
-
-A model writes a handoff note and a fresh session starts from it. Three
-files, three roles: the source is **never touched**; the summarizer runs in
-a session of its own, so the call that wrote the note replays like any
-other; and the new session holds the note as its first message, stamped
-`source: "summary"`, with its `parent` and its `summary` session named in
-the header. All three replay on their own.
-
-That stamping is the price of admission. Model-written text entering a
-conversation is exactly the kind of thing that should never happen quietly,
-so it happens under a verb you typed, and a reader — or a program — can
-always tell which message nobody actually said.
-
-Branching a conversation verbatim needs no verb at all. A session is a
-self-contained file and `-f` names one, so `cp` is fork:
-
-```
-$ cp ~/.ask/sessions/$id.jsonl ./what-if.jsonl
-$ ask -f what-if.jsonl "suppose we had used a ring buffer instead"
-```
-
-Sessions live in `~/.ask/sessions/` (or `$ASK_DIR`), with a `current`
-symlink naming the one a bare `ask` continues. One writer at a time: a
-second is refused, because two processes appending to one log would
-interleave two conversations and break every digest written afterwards. The
-lock is an `flock(2)` on the session file, so a writer that dies releases it
-on the way out — there is no lock file to find, and no session to unstick.
-
-## The system prompt
-
-The default is written for one situation: a model whose output is about to
-be read by a program. No preamble, no sign-off, no markdown chrome, exact
-shapes when a shape is asked for — and, the part that matters most, it
-knows it cannot ask a clarifying question, because nothing is listening on
-stdin. An ambiguous request gets the most useful reading plus a stated
-assumption, never a question mark and an empty pipe.
-
-It is a value, not a secret. `ask system` prints it, so extending it is
-ordinary shell rather than a config format:
-
-```
-$ ask -S "$(ask system; cat house-style.md)" "draft the release note"
-$ ask -S "" "raw model, no system prompt"
-$ export ASK_SYSTEM="You are a terse SQL tutor."
-```
-
-Whatever wins is recorded verbatim in the session header and on every
-request, so a log says what shaped it.
+Crossing a limit is an error; input is never silently truncated. Attachment
+bytes are stored in the session, so the log remains self-contained. Session
+files are created with mode 0600.
 
 ## The log
 
-One JSONL file per conversation, one event per line, appended and never
-rewritten:
+A session is append-only JSONL. Each line is one event:
 
-```
-session    the header: id, version, model, system prompt, SDK versions
-user       what you asked
-request    the exact normalized request — everything except the messages
-assistant  the turn as it streamed, blocks and all
-retry      a provider failure that was worth waiting out
-done       how it ended: end, max_tokens, overflow, error
-abort      interrupted
-note       something a program recorded about the run
-```
+| event | contents |
+| --- | --- |
+| `session` | session id, version, model, system prompt, SDK versions |
+| `user` | the user message and attachments |
+| `request` | normalized request fields and a digest of the folded messages |
+| `assistant` | streamed blocks, usage, model, and provider stop reason |
+| `retry` | a retryable provider failure and wait |
+| `done` | successful end, ordinary error, or context overflow |
+| `abort` | interruption |
+| `note` | attributed text that is recorded but not folded into conversation |
 
-A `note` is a record, not a message. It is not folded, so the conversation a
-provider sees is exactly what it was without it, and every digest already
-written still matches:
+`user` and complete `assistant` events form the conversation. Notes, retries,
+and other records do not.
 
-```
-$ ply -check 'go test ./...' "make the tests pass"     # ply writes one
-$ ask note -s deploy "shipped as v1.4.2" -f run.jsonl  # so can you
-```
+Before each provider call, `ask` hashes the folded conversation and stores the
+digest on the request event. Replay can check every request against the events
+that precede it:
 
-`-s` is required, and that is the whole design: there is no way to write an
-unattributed note. No model is called. It exists because an outcome that
-lives only in an exit status is gone the moment the shell moves on — until
-this, a session recorded everything that was *tried* and nothing about
-whether it *worked*, so a run that passed and a run that failed were the
-same shape. That is the one thing anything learning from a log needs.
-
-`user` and `assistant` events are the conversation; folding them produces
-exactly what goes to the provider. The `request` event records everything
-else about the call, and stands in for the messages with a SHA-256 digest
-rather than a second copy of what the file already holds.
-
-That is what makes the check possible. `ask replay -check` folds the events
-before each request and compares the hash. If they ever disagree, the log
-is not a record of what happened, and it says so:
-
-```
-$ ask replay -check
-ask: replay divergence at request seq 4:
-folded:  9c1d...
-logged:  2ef8...
+```sh
+ask replay                    # render the current session
+ask replay -json              # print its raw JSONL
+ask replay -check             # verify every request digest
+ask replay -step 4            # reconstruct the request at sequence 4
 ```
 
-Three views over the same events, and no second logging pipeline anywhere:
+Reasoning state is retained in the provider's own replayable form. When a
+session switches providers, text survives; opaque reasoning from the other
+provider is ignored.
 
-```
-$ ask replay              # re-render it for a human
-$ ask replay -json        # raw JSONL for a program
-$ ask replay -step 4      # the exact request, messages reconstituted
-```
+`ask note` appends an attributed record without calling a model:
 
-Reasoning state round-trips per provider — Anthropic thinking signatures,
-OpenAI encrypted reasoning (`store: false`, always), Gemini thought
-signatures, OpenRouter `reasoning_details` unmodified and in order — so a
-continued conversation is genuinely the same conversation. Switching
-providers mid-thread is allowed and degrades gracefully: each adapter
-replays its own opaque state and ignores another's.
-
-## Auth
-
-Keys come from the environment: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
-`GEMINI_API_KEY`, `OPENROUTER_API_KEY`.
-
-Subscription logins are stored instead, in `~/.ask/auth.json` (mode 0600):
-
-```
-$ ask login openai-codex -from-codex     # import from the Codex CLI
-$ ask auth
-$ ask logout openai-codex
+```sh
+ask note -s deploy -f run.jsonl 'released as v1.4.2'
 ```
 
-Corporate gateways are a transport property, not a provider feature: one
-authenticating HTTP client shared by every adapter.
+The session file must already exist. `-s` is required. Notes are not folded
+into the conversation.
 
-```
-export ANTHROPIC_BASE_URL=https://gateway.corp/anthropic
-export ASK_AUTH_URL=https://idp.corp/oauth/token
-export ASK_AUTH_CLIENT_ID=... ASK_AUTH_CLIENT_SECRET=...
-```
+## System prompt
 
-With `ASK_AUTH_URL` set, the vendor key becomes optional — the gateway owns
-it. Tokens live in memory for the life of the process, are refreshed with
-a margin, and are never written to disk. The transport never retries: `ask`
-owns retries, and they have to be visible in the log.
+`ask system` prints the built-in prompt. `-S` replaces it for one invocation,
+and `$ASK_SYSTEM` sets the default override:
 
-Token endpoints must be `https`, except on loopback. They are bounded in
-time, and they never follow a redirect. All three protect the same thing:
-the form body carries a client secret or a refresh token — the long-lived
-half — so http would put it on the wire in the clear, and Go would re-send
-it to whatever host a 307 named. A gateway inside a corporate network is
-still reached across a network.
-
-```
-ask: ASK_AUTH_URL: token endpoint http://idp.corp/oauth/token is http: a
-client secret or refresh token would travel in the clear. Use https (http
-is allowed only on loopback)
+```sh
+ask -S "$(ask system; cat house-style.md)" 'Draft the release note.'
+ask -S '' 'Use no system prompt.'
 ```
 
-That is refused when the endpoint is configured, not when a token first
-expires. The same rule covers `ask login -token-url` and a `token_url`
-already sitting in the credential file. [SECURITY.md](SECURITY.md) has the
-rest of what `ask` holds and where.
+The choice is recomputed on every invocation; a `-S` value does not persist
+to later turns. The session header records its creation prompt, while each
+request event records the prompt used for that call.
 
-Anthropic on Google Vertex AI follows Claude Code's environment
-conventions, so a machine configured for one works for the other:
+## Authentication and gateways
 
+API-key providers read:
+
+- `ANTHROPIC_API_KEY`
+- `OPENAI_API_KEY`
+- `GEMINI_API_KEY`
+- `OPENROUTER_API_KEY`
+
+Stored credentials use `~/.ask/auth.json`, or `$ASK_AUTH_FILE`. See
+[SECURITY.md](SECURITY.md) for what is stored and how it is protected.
+
+Each provider endpoint can be replaced with a corresponding base URL:
+
+- `ANTHROPIC_BASE_URL`
+- `OPENAI_BASE_URL`
+- `OPENAI_CODEX_BASE_URL`
+- `GEMINI_BASE_URL`
+- `OPENROUTER_BASE_URL`
+
+For an OAuth-authenticated gateway in front of an API-key provider, set
+`ASK_AUTH_URL` and, as needed,
+`ASK_AUTH_CLIENT_ID`, `ASK_AUTH_CLIENT_SECRET`, `ASK_AUTH_REFRESH_TOKEN`, and
+`ASK_AUTH_SCOPE`. Token endpoints must use HTTPS except on loopback. Token
+requests have a 30-second timeout and never follow redirects. `openai-codex`
+continues to use its stored subscription credential.
+
+Anthropic models can use the Vertex wire format:
+
+```sh
+export ANTHROPIC_VERTEX_PROJECT_ID=my-project
+export CLOUD_ML_REGION=us-east5
 ```
-export ANTHROPIC_VERTEX_PROJECT_ID=my-project CLOUD_ML_REGION=us-east5
-```
 
-The Vertex request reshaping happens below the logging layer, so request
-events keep their normalized shape and the replay invariant is untouched.
-
-## Think in shell
-
-```bash
-# a shape, not a chat (alert.schema.json defines sev and why)
-ask -schema alert.schema.json 'Classify this alert.' < alert.txt | jq .sev
-
-# fan out over files, each its own conversation
-ls *.go | xargs -P4 -I{} sh -c 'ask -n -q "review {}" < {} > {}.review'
-
-# branch on the answer
-if ask -q "is this a security fix? answer yes or no" < patch | grep -qi yes; then
-  git tag security-$(date +%s)
-fi
-
-# a second opinion from another model, same question
-ask -n -m openai/gpt-5 "$(ask replay -step 2 | jq -r '.messages[0].blocks[0].text')"
-
-# prove the whole archive still replays
-for f in ~/.ask/sessions/*.jsonl; do ask replay -check "$f" >/dev/null || echo "BAD $f"; done
-```
+`ANTHROPIC_VERTEX_BASE_URL` overrides the derived Vertex endpoint. `ask` does
+not obtain Google credentials; use `ASK_AUTH_URL` or a proxy that adds them.
 
 ## Commands
 
-```
-ask [flags] [message ...]       ask; piped stdin composes with the message
-ask replay [flags] [session]    re-render a session (-check verifies replay)
-ask compact [flags] [session]   continue a full conversation in a fresh one
-ask note -s src [flags] [text]  record something a program decided
-ask system                      print the default system prompt
-ask login openai-codex [flags]  store subscription auth (-from-codex)
+```text
+ask [flags] [message ...]       ask; stdin composes with the message
+ask replay [flags] [session]    render, inspect, or check a session
+ask compact [flags] [session]   continue a full session from a handoff
+ask note -s src [flags] [text]  append an attributed record
+ask system                      print the built-in system prompt
+ask login openai-codex [flags]  store subscription credentials
 ask logout <provider>           remove stored credentials
-ask auth [list]                 list stored credential providers
+ask auth [list]                 list stored credentials
 ask version                     print the version
-ask help                        print the summary
+ask help                        print the built-in summary
 ```
 
-Anything that is not a command is a message. A word one edit from a
-command is refused as a probable typo — otherwise `ask replya` is a paid
-model call appended to your live conversation — and `--` forces one
-through: `ask -- replay`.
+Run `ask help` for the short reference. [ask.1](ask.1) is the complete manual,
+and [GUIDE.md](GUIDE.md) explains reliable shell patterns.
 
-Full reference in `ask.1`. Tests enforce that it stays true: every verb
-appears in the man page synopsis, in `ask help`, and here; every flag,
-environment variable and provider is documented; the man page carries the
-same version the binary reports; the man page is lint-clean and pure ASCII;
-help fits eighty columns; and requested help goes to stdout while misuse
-goes to stderr.
+## Scope
 
-## What it deliberately is not
-
-`ask` is the conversational core of mu, a file-based agent of mine that is
-not public, carved out as a filter. What was left behind was left behind on
-purpose: no tools, no agent loop, no verifier, no workspace, no skills, no
-config file, no REPL, no daemon, no MCP.
-
-The pieces that came across are the ones that were hard to get right: the
-provider adapters and their reasoning round-trips, the stream contract
-every adapter is held to, gateway and subscription auth, and the replay
-invariant. That is about 1,950 lines and most of the value. The CLI, the
-log, the conversation loop and auth are the other 2,175 — 4,125 in total,
-against mu's 9,500, and 3,900 lines of tests holding it there.
-
-The turn loop itself is under sixty lines, and that is the point.
-
-A REPL was the closest call, and the answer was no: the shell already is
-one, and `ask` remembers between invocations.
+`ask` has no tools, agent loop, model-verifier loop, workspace, skills,
+configuration file, REPL, daemon, or MCP client. The shell supplies data and
+decides what to do with the answer. Local JSON Schema validation only decides
+whether structured bytes may reach stdout; it does not add another model turn.
 
 ## Contributing
 
-Read [AGENTS.md](AGENTS.md) first — it is short, and it is the whole set of
-rules a change is held to. The two that matter most: the Unix contract
-(stdout is the answer alone, exit 2 means the context window and nothing
-else) and the replay invariant (`event.Check` is never relaxed, only
-migrated). New provider adapters earn their keep by passing `checkContract`
-against a wire fixture.
+Read [AGENTS.md](AGENTS.md) before changing the program. At minimum, run:
 
-```
-go test ./...          # and -race when touching the log or a stream
+```sh
+go test ./...
 ```
 
-`go test` also proves the documentation: every command appears in the man
-page, in `ask help`, and here; every flag and environment variable is
-documented; help fits eighty columns and goes to stdout while misuse goes to
-stderr. A change that outruns its docs fails.
+Run `go test -race ./...` after changing the log or a provider stream. Tests
+also check command, flag, environment, provider, help, and man-page coverage.
 
-The list of things left out on purpose is at the end of AGENTS.md. It is a
-feature, and adding one of them back is a conversation before it is a patch.
-
-Security issues go through [SECURITY.md](SECURITY.md), not the issue
-tracker.
+Report security problems through [SECURITY.md](SECURITY.md), not a public
+issue.
 
 ## License
 

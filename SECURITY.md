@@ -4,25 +4,26 @@
 
 Report a vulnerability privately through GitHub's
 [security advisory form](https://github.com/patrickyoung/ask/security/advisories/new).
-Please do not open a public issue for anything exploitable. Expect an
-acknowledgement within a few days.
+Please do not open a public issue for anything exploitable.
 
 ## What ask holds
 
-`ask` is a filter, not a service. It listens on nothing, opens no ports, and
-runs no code on your behalf. What it does hold is credentials and
-conversations, and both live in `~/.ask`:
+`ask` is a filter, not a service. It does not listen for incoming connections
+or run code on your behalf. By default, its stored credentials and automatic
+session files live under `~/.ask`:
 
 | path | mode | contents |
 | --- | --- | --- |
-| `~/.ask/auth.json` | 0600 | OAuth access and refresh tokens (`ask login`) |
-| `~/.ask/sessions/*.jsonl` | 0600 | every message, answer, and attachment, verbatim |
+| `~/.ask/auth.json` | 0600 | OAuth tokens and refresh metadata (`ask login`) |
+| `~/.ask/sessions/*.jsonl` | 0600 | messages, answers, attachments, and request metadata |
 
-Both directories are 0700.
+`ASK_AUTH_FILE` and `ASK_DIR` move those defaults; an explicit `-f` session
+can live elsewhere. Directories created by `ask` use mode 0700.
 
-A session log holds the bytes of anything you attached and the whole text of
-anything you piped in. That is what makes it replay exactly, and it means a
-session file deserves the same care as the material that went into it.
+A session log holds media attachment bytes, inlined text files, and the user
+message formed from argv and stdin. Surrounding whitespace on textual stdin
+is removed when that message is formed. The resulting session is
+self-contained, so a session file deserves the same care as its inputs.
 Copying one copies everything it means.
 
 API keys are read from the environment and are never written to disk.
@@ -45,17 +46,19 @@ Gateway tokens (`ASK_AUTH_URL`) live in memory for the life of the process.
   the secret is a form field. `ask` returns the redirect as an error instead.
 - **Token requests are bounded in time.** Model streams are not; bound those
   yourself (see [GUIDE.md](GUIDE.md)).
-- **A rotating refresh token is spent once.** Refreshes happen under a lock
-  on the credential file, so a parallel fan-out cannot have eight processes
-  each present the same token and the last one store a version the issuer
-  has already retired — which would log you out of your own account.
+- **A stored rotating refresh token is spent once.** Refreshes of credentials
+  in the auth file happen under its lock, so parallel processes cannot spend
+  the same stored token and race to save different replacements.
 - **Attachments are typed by content, never by name.** A `.png` holding a
   shell script is a shell script. Filenames handed to the model are reduced
   to a base name with control characters stripped, so a file cannot name
   itself into the prompt.
-- **Nothing is decoded.** No image dimensions, no PDF structure, no audio
+- **Media is not decoded.** No image dimensions, no PDF structure, no audio
   duration — `ask` matches a signature and passes the bytes through. There
   are no media parsers, and so no media parser bugs.
+- **JSON Schemas cannot fetch other documents.** Local fragment references
+  work, but the schema compiler has no external URL loader. This prevents a
+  schema from turning validation into a network or filesystem read.
 - **One writer per session,** enforced by a lock, because two processes
   appending to one log would interleave two conversations and break every
   digest after the first.
@@ -66,7 +69,7 @@ Gateway tokens (`ASK_AUTH_URL`) live in memory for the life of the process.
 ## Not in scope
 
 Anything a language model writes is untrusted input. `ask` puts it on
-stdout, and what happens next is the shell's business — piping model output
-into `eval`, `sh`, or `jq -e` is your decision, not ask's. Prompt injection
-through attached or piped content is inherent to the task: if you feed it a
-hostile document, the answer is downstream of a hostile document.
+stdout, and what happens next is the shell's business. Piping model output
+into `eval` or `sh` executes untrusted text. Prompt injection through attached
+or piped content is inherent to the task: if you feed it a hostile document,
+the answer is downstream of a hostile document.

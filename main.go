@@ -3,7 +3,7 @@
 //
 // It is a filter. The answer is stdout, progress is stderr, and the exit
 // code says what happened, so ask composes with everything else in the
-// shell. Every run appends to an append-only JSONL session log that
+// shell. Every model turn appends to an append-only JSONL session log that
 // replays exactly: `ask replay -check` proves that the conversation sent
 // to the model is a function of the log and nothing else.
 package main
@@ -38,59 +38,65 @@ const usageText = `ask — put a question through a language model, get the answ
   ask replay [flags] [session]    re-render a session (-check verifies replay)
   ask compact [flags] [session]   continue a full conversation in a fresh one
   ask note -s src [flags] [text]  record something a program decided
-  ask system                      print the default system prompt
+  ask system                      print the built-in system prompt
   ask login openai-codex [flags]  store subscription auth (-from-codex)
   ask logout <provider>           remove stored credentials
   ask auth [list]                 list stored credential providers
   ask version                     print the version (-V, --version)
   ask help                        print this summary (-h, --help)
 
-Anything that is not a command is a message; -- sends a word that is one.
+Anything that is not a command is a message; -- forces a command-like word.
 
-pipes: the answer is stdout, progress is stderr (2>/dev/null hides it), and
-the exit code says what happened. Piped stdin is the message, or rides with
-one: git diff | ask "write a commit message".
+streams: the answer is stdout. Progress and errors are stderr. Piped stdin
+is the message, or data for an instruction:
+  git diff | ask -n "write a commit message"
 
-conversation: each run continues the current session, so ask remembers what
-was said. -n starts a fresh one, -f keeps a thread in a file of your own.
+conversation: each ask continues the current session. -n starts a fresh one;
+-f keeps a thread in a file of your own.
 A session that fills the window is exit 2 and stays exit 2; ask compact
 starts a fresh one from a model-written handoff note, so the work survives
 the window. Branching verbatim needs no verb: cp the file.
 
-attachments: -a takes a file and repeats. What a file is decided by reading
-it, never by its name: text is inlined, images, PDFs, audio and video ride
-as attachments. Binary on stdin is an attachment too, so
-screencapture -x -t png - | ask "what is this?" needs no flag. Providers
+attachments: -a takes a regular file and repeats. Content decides its type:
+text is inlined; images, PDFs, audio and video are attached. Binary stdin is
+an attachment too, so
+screencapture -x -t png - | ask -n "what is this?" needs no flag. Providers
 differ in what they carry, and ask says so before sending, not after.
 
 flags:
-  -m spec       provider/model, e.g. anthropic/claude-sonnet-5 ($ASK_MODEL);
-                when continuing, defaults to the session's own model
+  -m spec       provider/model. Default: $ASK_MODEL, then the continued
+                session's model; e.g. anthropic/your-model
   -a file       attach a file; repeat for more (16 max, 16MB each, 32MB
                 total). The bytes land in the session log, so it replays
-  -S text       system prompt, replacing the default ($ASK_SYSTEM). -S ""
-                sends none; compose with -S "$(ask system; cat style.md)"
+  -S text       system prompt for this call, replacing $ASK_SYSTEM or the
+                built-in default. -S "" sends none
   -n            start a new conversation instead of continuing
   -f file       session log to read and append to (default: -d's current)
   -d dir        conversation directory ($ASK_DIR, or ~/.ask/sessions)
-  -effort e     reasoning effort: off, low, medium, high (default: the
-                provider's own, thinking on)
-  -max-tokens n max output tokens (default 16384)
+  -effort e     reasoning effort: off, low, medium, high; provider mapping
+                varies (default: the provider's own)
+  -max-tokens n max output tokens (default 16384; not sent to openai-codex)
   -schema file  constrain the answer with JSON Schema ("-" reads stdin)
-  -json         emit the raw event stream on stdout instead of the answer
-  -q            no progress on stderr
+  -json         emit this invocation's raw events instead of the answer
+  -q            no progress on stderr; errors still print
 compact only:
   -m spec       summarizer provider/model (default: the session's own)
   -d dir        conversation directory ($ASK_DIR)
-  -q            no progress on stderr
+  -q            no progress on stderr; errors still print
                 The note lands as the first message of a new session,
                 stamped source=summary, with the parent and the
                 summarizer's own session named in the header. The source
                 is never touched. stdout is the new session's path.
 replay only:
+  -d dir        conversation directory ($ASK_DIR)
   -check        verify the replay invariant and exit
-  -step n       print the exact provider request logged at this seq
+  -step n       print the normalized request at this seq, rebuilding messages
   -json         emit the raw events instead of re-rendering
+note only:
+  -s source     program writing the note (required, one word)
+  -f file       session to append to (default: current)
+  -d dir        conversation directory ($ASK_DIR)
+  -q            no progress on stderr; errors still print
 login only:
   -from-codex       import auth from the official Codex CLI — the usual path
   -access-token t   store this access token ('-' reads stdin)
@@ -103,12 +109,15 @@ login only:
                     prefer stdin, and -from-codex over both.
 
 keys: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY
-stored auth: ~/.ask/auth.json (or ASK_AUTH_FILE) for openai-codex/<model>
-env:  ASK_MODEL (-m) · ASK_SYSTEM (-S) · ASK_DIR (-d) · NO_COLOR
-gateway: <PROVIDER>_BASE_URL points a provider at a corporate gateway;
-  ASK_AUTH_URL (+ ASK_AUTH_CLIENT_ID/_CLIENT_SECRET/_REFRESH_TOKEN/_SCOPE)
-  adds OAuth bearer auth — vendor keys then live gateway-side and are
-  optional. Token endpoints must be https, except on loopback
+stored auth: ~/.ask/auth.json (or ASK_AUTH_FILE) for openai-codex/<model>;
+  CODEX_HOME selects the Codex CLI directory used by -from-codex
+env: ASK_MODEL (-m) · ASK_SYSTEM (-S) · ASK_DIR (-d) · NO_COLOR
+gateway: ANTHROPIC_BASE_URL · OPENAI_BASE_URL · OPENAI_CODEX_BASE_URL ·
+  GEMINI_BASE_URL · OPENROUTER_BASE_URL replace provider endpoints;
+  ASK_AUTH_URL adds OAuth bearer auth to API-key providers. Optional auth:
+  ASK_AUTH_CLIENT_ID · ASK_AUTH_CLIENT_SECRET · ASK_AUTH_REFRESH_TOKEN ·
+  ASK_AUTH_SCOPE. Vendor keys become optional. Token endpoints must be https
+  except on loopback
 vertex: ANTHROPIC_VERTEX_PROJECT_ID + CLOUD_ML_REGION route anthropic/ models
   through Google Vertex AI (ANTHROPIC_VERTEX_BASE_URL overrides the endpoint)
 exit: 0 answered · 1 error · 2 context window full · 130 interrupted
@@ -213,7 +222,7 @@ func cmdAsk(args []string) int {
 	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
 	var (
 		spec       = fs.String("m", os.Getenv("ASK_MODEL"), "provider/model")
-		sys        = fs.String("S", "", "system prompt (default: ask system)")
+		sys        = fs.String("S", "", "system prompt for this call")
 		fresh      = fs.Bool("n", false, "start a new conversation")
 		file       = fs.String("f", "", "session log file")
 		dir        = fs.String("d", askDir(), "conversation directory")
@@ -221,7 +230,7 @@ func cmdAsk(args []string) int {
 		maxTokens  = fs.Int("max-tokens", 16384, "max output tokens")
 		schemaFile = fs.String("schema", "", "JSON Schema for the answer ('-' reads stdin)")
 		jsonOut    = fs.Bool("json", false, "emit raw events on stdout")
-		quiet      = fs.Bool("q", false, "no progress on stderr")
+		quiet      = fs.Bool("q", false, "no progress on stderr; errors still print")
 		attached   attachFlag
 	)
 	fs.Var(&attached, "a", "attach a file; repeat for more")
@@ -569,7 +578,7 @@ func cmdReplay(args []string) int {
 		dir     = fs.String("d", askDir(), "conversation directory")
 		jsonOut = fs.Bool("json", false, "emit raw events on stdout")
 		check   = fs.Bool("check", false, "verify the replay invariant and exit")
-		step    = fs.Int("step", 0, "print the exact provider request at this seq")
+		step    = fs.Int("step", 0, "print the normalized request at this seq")
 	)
 	usage(fs, "ask replay [flags] [session]")
 	if err := fs.Parse(args); err != nil {
