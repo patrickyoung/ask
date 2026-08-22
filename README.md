@@ -226,6 +226,7 @@ that precede it:
 ask replay                    # render the current session
 ask replay -json              # print its raw JSONL
 ask replay -check             # verify request folds, sequence, and record seals
+ask replay -check -json       # print that same verified event snapshot
 ask replay -step 4            # reconstruct the request at sequence 4
 ```
 

@@ -276,7 +276,10 @@ Suppress progress on stderr. Errors still go to stderr.
 .TP
 .B \-check
 .RB ( replay )
-Verify the replay invariant and exit.
+Verify the replay invariant before producing output.
+Combined with
+.BR \-json ,
+emit the exact verified event snapshot as JSONL.
 .TP
 .BI \-step " n"
 .RB ( replay )

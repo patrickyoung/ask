@@ -48,6 +48,8 @@ When changing `ask`:
   unsigned one: the moment either happens, a session stops being able to say
   who put a sentence in it. Structured records are atomic with a prefix seal:
   replay must reject an unsealed record, a sequence gap, or a changed prefix.
+  `replay -check -json` emits the same in-memory event snapshot it verified;
+  do not split that producer contract back into a check followed by a reread.
   A failing verifier result is both a record and a `user` message because the
   model has to act on it; a passing one is only a record, because the run is
   over and it is addressed to a later reader;

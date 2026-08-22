@@ -731,6 +731,35 @@ func TestReplayCheckProvesTheSession(t *testing.T) {
 	}
 }
 
+func TestReplayCheckJSONEmitsTheVerifiedSnapshot(t *testing.T) {
+	dir, _, _ := fake(t, 200, answerWire)
+	exec(t, "", "first")
+	path := filepath.Join(dir, sessions(t, dir)[0])
+	want, err := event.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := exec(t, "", "replay", "-check", "-json", path)
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	}
+	var got []event.Event
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		var item event.Event
+		if err := json.Unmarshal([]byte(line), &item); err != nil {
+			t.Fatalf("decode verified JSON event: %v\n%s", err, stdout)
+		}
+		got = append(got, item)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("events=%d want %d", len(got), len(want))
+	}
+	if err := event.Check(got); err != nil {
+		t.Fatalf("emitted snapshot does not verify: %v", err)
+	}
+}
+
 // TestReplayCheckCatchesAnEditedLog: a log that was tampered with must
 // fail, or the check would be decoration.
 func TestReplayCheckCatchesAnEditedLog(t *testing.T) {

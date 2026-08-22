@@ -90,9 +90,9 @@ compact only:
                 is never touched. stdout is the new session's path.
 replay only:
   -d dir        conversation directory ($ASK_DIR)
-  -check        verify the replay invariant and exit
+  -check        verify the replay invariant before producing output
   -step n       print the normalized request at this seq, rebuilding messages
-  -json         emit the raw events instead of re-rendering
+  -json         emit raw events; combine with -check for a verified snapshot
 note only:
   -s source     program writing the note (required, one word)
   -f file       session to append to (default: current)
@@ -590,7 +590,7 @@ func cmdReplay(args []string) int {
 	var (
 		dir     = fs.String("d", askDir(), "conversation directory")
 		jsonOut = fs.Bool("json", false, "emit raw events on stdout")
-		check   = fs.Bool("check", false, "verify the replay invariant and exit")
+		check   = fs.Bool("check", false, "verify the replay invariant before producing output")
 		step    = fs.Int("step", 0, "print the normalized request at this seq")
 	)
 	usage(fs, "ask replay [flags] [session]")
@@ -619,7 +619,14 @@ func cmdReplay(args []string) int {
 		if err := event.Check(events); err != nil {
 			return fail(err)
 		}
-		fmt.Printf("ok: %s replays exactly; sealed records verify (%d events)\n", filepath.Base(path), len(events))
+		if *jsonOut {
+			emit := jsonEvents(os.Stdout)
+			for _, e := range events {
+				emit(e)
+			}
+		} else {
+			fmt.Printf("ok: %s replays exactly; sealed records verify (%d events)\n", filepath.Base(path), len(events))
+		}
 	case *step > 0:
 		for i, e := range events {
 			if e.Seq != *step || e.Type != event.Request {
