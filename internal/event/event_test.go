@@ -2,6 +2,7 @@ package event
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -246,6 +247,51 @@ func TestAppendSealedRoundTripAndTamperDetection(t *testing.T) {
 	events[1].Data, _ = json.Marshal(note)
 	if err := Check(events); err == nil || !strings.Contains(err.Error(), "seal divergence") {
 		t.Fatalf("tampered record check = %v, want seal divergence", err)
+	}
+}
+
+func TestOpenRefusesToAppendAfterTamperedSealedPrefix(t *testing.T) {
+	log, err := Create(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(Session, Header{ID: log.ID(), Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.AppendSealed(Note, NoteData{Source: "bench", Kind: "bench.contract/v2", Body: json.RawMessage(`{"status":"compiled"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	path := log.Path()
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events, err := ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var note NoteData
+	if err := json.Unmarshal(events[1].Data, &note); err != nil {
+		t.Fatal(err)
+	}
+	note.Body = json.RawMessage(`{"status":"changed"}`)
+	events[1].Data, _ = json.Marshal(note)
+	var damaged bytes.Buffer
+	for _, event := range events {
+		line, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		damaged.Write(line)
+		damaged.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, damaged.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, _, err := Open(path); err == nil {
+		reopened.Close()
+		t.Fatal("tampered prefix was reopened for append")
+	} else if !strings.Contains(err.Error(), "verify session before append") || !strings.Contains(err.Error(), "seal divergence") {
+		t.Fatalf("open error = %v", err)
 	}
 }
 

@@ -89,6 +89,13 @@ func Open(path string) (*Log, []Event, error) {
 		f.Close()
 		return nil, nil, err
 	}
+	// A new seal is meaningful only if the prefix it commits was already
+	// valid. Verify under the same writer lock used for the read so a note
+	// cannot bless an older divergence and defer discovery until replay.
+	if err := Check(events); err != nil {
+		f.Close()
+		return nil, nil, fmt.Errorf("verify session before append: %w", err)
+	}
 	seq := 0
 	if n := len(events); n > 0 {
 		seq = events[n-1].Seq
