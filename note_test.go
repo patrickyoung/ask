@@ -67,6 +67,60 @@ func TestNoteAppendsStampedRecord(t *testing.T) {
 	}
 }
 
+func TestStructuredNoteIsSealedAndReplayVerified(t *testing.T) {
+	dir, _, _ := fake(t, 200, answerWire)
+	if code, _, _ := exec(t, "", "hello"); code != 0 {
+		t.Fatal("seeding")
+	}
+	cur, _ := event.Latest(dir)
+
+	body := `{"status":"accepted","exit_code":0}`
+	code, stdout, stderr := exec(t, body, "note", "-s", "ply", "-k", "ply.verifier/v1", "-json", "-", "-seal")
+	if code != 0 {
+		t.Fatalf("structured note: exit %d, stderr %q", code, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+	es := events(t, cur)
+	if len(es) < 2 || es[len(es)-2].Type != event.Note || es[len(es)-1].Type != event.Seal {
+		t.Fatalf("tail = %+v, want note then seal", es)
+	}
+	n, err := event.As[event.NoteData](es[len(es)-2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.Kind != "ply.verifier/v1" || string(n.Body) != body || n.Text != "" {
+		t.Fatalf("structured note = %+v", n)
+	}
+	if err := event.Check(es); err != nil {
+		t.Fatalf("replay check: %v", err)
+	}
+}
+
+func TestStructuredNoteFlagsAreAtomic(t *testing.T) {
+	dir, _, _ := fake(t, 200, answerWire)
+	if code, _, _ := exec(t, "", "hello"); code != 0 {
+		t.Fatal("seeding")
+	}
+	cur, _ := event.Latest(dir)
+	before := len(events(t, cur))
+
+	for _, argv := range [][]string{
+		{"note", "-s", "ply", "-k", "ply.verifier/v1", "-json", `{}`},
+		{"note", "-s", "ply", "-k", "ply.verifier/v1", "-seal"},
+		{"note", "-s", "ply", "-json", `{}`, "-seal"},
+		{"note", "-s", "ply", "-k", "ply.verifier/v1", "-json", `{bad`, "-seal"},
+	} {
+		if code, _, _ := exec(t, "", argv...); code == 0 {
+			t.Fatalf("%v unexpectedly succeeded", argv)
+		}
+	}
+	if after := len(events(t, cur)); after != before {
+		t.Fatalf("invalid structured notes changed log: before %d, after %d", before, after)
+	}
+}
+
 // The invariant. A note is a record, not a message: it must not change the
 // conversation a provider sees, and it must not disturb a digest already
 // written. Both halves are asserted, because either one alone would pass

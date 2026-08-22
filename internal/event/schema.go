@@ -35,6 +35,7 @@ const (
 	Retry Type = "retry" // RetryData
 	Abort Type = "abort" // no payload: interrupted, and the log stays usable
 	Note  Type = "note"  // NoteData: something a program recorded about the run
+	Seal  Type = "seal"  // SealData: digest of the exact event prefix before this event
 )
 
 // NoteData is an attributed record written by a program. It is not folded,
@@ -42,8 +43,18 @@ const (
 // digest. Source is required because unattributed program text would make the
 // log ambiguous.
 type NoteData struct {
-	Source string `json:"source"`
-	Text   string `json:"text"`
+	Source string          `json:"source"`
+	Text   string          `json:"text,omitempty"`
+	Kind   string          `json:"kind,omitempty"`
+	Body   json.RawMessage `json:"body,omitempty"`
+}
+
+// SealData authenticates the exact serialized event prefix ending at Through.
+// It does not assert that the program which wrote a record told the truth; it
+// makes subsequent edits, omissions, and reordering detectable by replay.
+type SealData struct {
+	Through int    `json:"through"`
+	SHA256  string `json:"sha256"`
 }
 
 type Event struct {

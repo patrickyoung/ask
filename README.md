@@ -225,7 +225,7 @@ that precede it:
 ```sh
 ask replay                    # render the current session
 ask replay -json              # print its raw JSONL
-ask replay -check             # verify every request digest
+ask replay -check             # verify request folds, sequence, and record seals
 ask replay -step 4            # reconstruct the request at sequence 4
 ```
 
@@ -241,6 +241,23 @@ ask note -s deploy -f run.jsonl 'released as v1.4.2'
 
 The session file must already exist. `-s` is required. Notes are not folded
 into the conversation.
+
+Programs can instead append typed JSON evidence and require a durable prefix
+seal. JSON on stdin keeps evidence out of argv:
+
+```sh
+printf '%s' '{"status":"accepted","exit_code":0}' |
+  ask note -s ply -f run.jsonl -k ply.verifier/v1 -json - -seal
+ask replay -check run.jsonl
+```
+
+`-k`, `-json`, and `-seal` are atomic: all three are required. Replay checks
+that each structured note is immediately sealed and that its exact event
+prefix, event numbering, and every request fold still match. A seal detects
+later edits; it attributes the record to the named local program, not to a
+remote identity or cryptographic signing key. Because the digest is stored in
+the same append-only file, it does not prove that the file was not truncated
+back to an earlier valid sealed prefix.
 
 ## System prompt
 
@@ -299,7 +316,7 @@ not obtain Google credentials; use `ASK_AUTH_URL` or a proxy that adds them.
 ask [flags] [message ...]       ask; stdin composes with the message
 ask replay [flags] [session]    render, inspect, or check a session
 ask compact [flags] [session]   continue a full session from a handoff
-ask note -s src [flags] [text]  append an attributed record
+ask note -s src [flags] [text]  append text or sealed structured JSON
 ask system                      print the built-in system prompt
 ask login openai-codex [flags]  store subscription credentials
 ask logout <provider>           remove stored credentials

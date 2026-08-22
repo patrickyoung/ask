@@ -101,7 +101,14 @@ func (r *renderer) event(e event.Event) {
 		// Named, always. A note renders as its source and its first line
 		// because the source is the part a reader needs: this is the one
 		// kind of text in a session that nobody typed.
-		r.line(r.dim("[" + n.Source + "] " + firstLine(n.Text, 120)))
+		label, content := n.Source, n.Text
+		if n.Kind != "" {
+			label, content = n.Source+":"+n.Kind, string(n.Body)
+		}
+		r.line(r.dim("[" + label + "] " + firstLine(content, 120)))
+	case event.Seal:
+		s, _ := event.As[event.SealData](e)
+		r.line(r.dim(fmt.Sprintf("[ask:seal] through %d · %s", s.Through, firstLine(s.SHA256, 24))))
 	case event.Abort:
 		r.line(r.dim("ask: interrupted"))
 	}

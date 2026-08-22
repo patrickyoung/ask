@@ -39,16 +39,18 @@ When changing `ask`:
   document remains an honest assistant turn in the append-only log; do not
   repair it with another model call or hide it from replay;
 
-- **a note is a record, not a message.** `ask note` puts text in a session
+- **a note is a record, not a message.** `ask note` puts text or typed JSON in a session
   without a model call, and it is not folded — so the conversation a
   provider sees is exactly what it was without it, and every digest ever
   written still matches. `-s` is required and there is no way around it,
   which is what makes the verb an instance of the rule below rather than an
   exception to it. Do not fold notes, and do not add a way to write an
   unsigned one: the moment either happens, a session stops being able to say
-  who put a sentence in it. A failing check is a `user` message because the
-  model has to act on it; a passing one is a note, because the run is over
-  and it is addressed to a later reader;
+  who put a sentence in it. Structured records are atomic with a prefix seal:
+  replay must reject an unsealed record, a sequence gap, or a changed prefix.
+  A failing verifier result is both a record and a `user` message because the
+  model has to act on it; a passing one is only a record, because the run is
+  over and it is addressed to a later reader;
 - **model-written text in a conversation is stamped, or it does not go in.**
   `ask compact` is the one thing that puts words in a conversation that
   nobody said, and it is admissible only because every part of it is

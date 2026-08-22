@@ -209,7 +209,11 @@ func transcript(events []event.Event) string {
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(&b, "[%s]\n%s\n\n", n.Source, n.Text)
+			label, body := n.Source, n.Text
+			if n.Kind != "" {
+				label, body = n.Source+":"+n.Kind, string(n.Body)
+			}
+			fmt.Fprintf(&b, "[%s]\n%s\n\n", label, body)
 		}
 	}
 	return b.String()

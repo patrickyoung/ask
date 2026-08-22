@@ -129,6 +129,21 @@ is required, is one word, and names the program recording the note.
 .IP
 A note is not folded. It is a record, not a message, so it does not change
 the conversation sent to a provider or any existing request digest.
+.IP
+For machine-readable evidence,
+.BI \-k " kind"
+names the record type,
+.BI \-json " body"
+supplies a JSON value (use
+.B \-json \-
+to read it from standard input), and
+.B \-seal
+fsyncs the record followed by a digest of the exact event prefix. All three
+options are required together. Replay checks event numbering, that each
+structured note is immediately sealed, and the seal digest. The seal detects
+later edits; it is not a cryptographic identity signature.
+Because the digest lives in the same append-only file, it is not external
+proof that the file was never truncated to an earlier valid sealed prefix.
 .TP
 .B ask system
 Print the built\-in system prompt on stdout. The prompt is a value, not a

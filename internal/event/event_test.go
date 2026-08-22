@@ -209,6 +209,58 @@ func TestLogRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAppendSealedRoundTripAndTamperDetection(t *testing.T) {
+	dir := t.TempDir()
+	log, err := Create(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(Session, Header{ID: log.ID(), Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	body := json.RawMessage(`{"status":"accepted","candidate_sha256":"sha256:abc"}`)
+	if _, err := log.AppendSealed(Note, NoteData{Source: "ply", Kind: "ply.verifier/v1", Body: body}); err != nil {
+		t.Fatal(err)
+	}
+	path := log.Path()
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 || events[1].Type != Note || events[2].Type != Seal {
+		t.Fatalf("events = %+v, want session, note, seal", events)
+	}
+	if err := Check(events); err != nil {
+		t.Fatalf("sealed log did not verify: %v", err)
+	}
+
+	var note NoteData
+	if err := json.Unmarshal(events[1].Data, &note); err != nil {
+		t.Fatal(err)
+	}
+	note.Body = json.RawMessage(`{"status":"rejected","candidate_sha256":"sha256:abc"}`)
+	events[1].Data, _ = json.Marshal(note)
+	if err := Check(events); err == nil || !strings.Contains(err.Error(), "seal divergence") {
+		t.Fatalf("tampered record check = %v, want seal divergence", err)
+	}
+}
+
+func TestCheckRefusesUnsealedStructuredRecordAndSequenceGap(t *testing.T) {
+	raw, _ := json.Marshal(NoteData{Source: "ply", Kind: "ply.verifier/v1", Body: json.RawMessage(`{"status":"accepted"}`)})
+	events := []Event{{Seq: 1, Type: Session, Data: json.RawMessage(`{}`)}, {Seq: 2, Type: Note, Data: raw}}
+	if err := Check(events); err == nil || !strings.Contains(err.Error(), "not immediately sealed") {
+		t.Fatalf("unsealed record check = %v", err)
+	}
+	events[1].Seq = 3
+	if err := Check(events); err == nil || !strings.Contains(err.Error(), "sequence divergence") {
+		t.Fatalf("sequence gap check = %v", err)
+	}
+}
+
 // TestSetCurrentStaysHome: current names a session in the conversation
 // directory. A session elsewhere cannot be named without dropping a symlink
 // in a directory ask was only visiting.
@@ -391,6 +443,47 @@ func TestReadFileTornTail(t *testing.T) {
 	}
 	if len(events) != 1 {
 		t.Fatalf("read %d events, want 1", len(events))
+	}
+}
+
+func TestOpenRepairsTornTailBeforeContinuing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	good := `{"seq":1,"type":"session","data":{}}` + "\n"
+	if err := os.WriteFile(path, []byte(good+`{"seq":2,"type":"assis`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	log, previous, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(previous) != 1 {
+		t.Fatalf("previous events = %d, want 1", len(previous))
+	}
+	if _, err := log.Append(Done, DoneData{Reason: "end"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events, err := ReadFile(path)
+	if err != nil || len(events) != 2 || events[1].Seq != 2 {
+		t.Fatalf("continued events=%+v err=%v", events, err)
+	}
+}
+
+func TestReadFileMalformedTerminatedTailIsCorruption(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	body := `{"seq":1,"type":"user","data":{"text":"hi"}}` + "\n" +
+		`{"seq":2,"type":"broken"` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	events, err := ReadFile(path)
+	if err == nil {
+		t.Fatal("newline-terminated malformed final event was treated as a torn write")
+	}
+	if len(events) != 1 {
+		t.Fatalf("salvaged %d events, want 1", len(events))
 	}
 }
 

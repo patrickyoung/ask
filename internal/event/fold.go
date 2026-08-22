@@ -37,10 +37,11 @@ func Fold(events []Event) ([]provider.Message, error) {
 	return msgs, nil
 }
 
-// Check verifies the replay invariant across a log: for every request
-// event, folding the events before it must reproduce the conversation the
-// request was made with. This is what "perfectly replayable" means, made
-// testable — old logs verify against current code.
+// Check verifies the replay invariant across a log: sequence numbers are
+// contiguous, every request fold reproduces the conversation used, and every
+// structured program record has a valid prefix seal. This is what
+// "perfectly replayable" means here, made testable — old logs still verify
+// against current code.
 //
 // A request event records its messages as a digest (see provider.Logged),
 // so the check is a hash comparison. Logs written before the digest carry
@@ -48,7 +49,51 @@ func Fold(events []Event) ([]provider.Message, error) {
 // the same assertion, and neither is ever weakened. A request that records
 // neither is an error, so a lost field cannot make Check vacuously pass.
 func Check(events []Event) error {
+	// Real session logs have numbered events beginning at one. Keep accepting
+	// old in-memory callers whose synthetic fixtures predate sequence numbers,
+	// but once a log opts into numbering it must be contiguous.
+	if len(events) > 0 && events[0].Seq > 0 {
+		for i, e := range events {
+			if want := i + 1; e.Seq != want {
+				return fmt.Errorf("event sequence divergence at index %d: got seq %d, want %d", i, e.Seq, want)
+			}
+		}
+	}
 	for i, e := range events {
+		if e.Type == Note {
+			n, err := As[NoteData](e)
+			if err != nil {
+				return err
+			}
+			if n.Kind != "" {
+				if len(n.Body) == 0 || !json.Valid(n.Body) {
+					return fmt.Errorf("structured note seq %d has no valid JSON body", e.Seq)
+				}
+				if i+1 >= len(events) || events[i+1].Type != Seal {
+					return fmt.Errorf("structured note seq %d is not immediately sealed", e.Seq)
+				}
+			}
+		}
+		if e.Type == Seal {
+			s, err := As[SealData](e)
+			if err != nil {
+				return err
+			}
+			wantThrough := 0
+			if i > 0 {
+				wantThrough = events[i-1].Seq
+			}
+			if s.Through != wantThrough {
+				return fmt.Errorf("seal seq %d names prefix through %d, want %d", e.Seq, s.Through, wantThrough)
+			}
+			got, err := PrefixDigest(events[:i])
+			if err != nil {
+				return err
+			}
+			if got != s.SHA256 {
+				return fmt.Errorf("seal divergence at seq %d:\ncomputed: %s\nlogged:   %s", e.Seq, got, s.SHA256)
+			}
+		}
 		if e.Type != Request {
 			continue
 		}

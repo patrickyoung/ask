@@ -37,7 +37,7 @@ const usageText = `ask — put a question through a language model, get the answ
   ask [flags] [message ...]       ask; -a attaches files, stdin composes
   ask replay [flags] [session]    re-render a session (-check verifies replay)
   ask compact [flags] [session]   continue a full conversation in a fresh one
-  ask note -s src [flags] [text]  record something a program decided
+  ask note -s src [flags] [text]  record text or sealed structured JSON
   ask system                      print the built-in system prompt
   ask login openai-codex [flags]  store subscription auth (-from-codex)
   ask logout <provider>           remove stored credentials
@@ -619,7 +619,7 @@ func cmdReplay(args []string) int {
 		if err := event.Check(events); err != nil {
 			return fail(err)
 		}
-		fmt.Printf("ok: %s replays exactly (%d events)\n", filepath.Base(path), len(events))
+		fmt.Printf("ok: %s replays exactly; sealed records verify (%d events)\n", filepath.Base(path), len(events))
 	case *step > 0:
 		for i, e := range events {
 			if e.Seq != *step || e.Type != event.Request {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,11 +22,12 @@ import (
 // and O_APPEND, so every line lands at the true end of the file and no
 // stale offset can leave a hole of zeroes mid-session.
 type Log struct {
-	mu   sync.Mutex
-	f    *os.File
-	path string
-	seq  int
-	obs  func(Event)
+	mu     sync.Mutex
+	f      *os.File
+	path   string
+	seq    int
+	obs    func(Event)
+	events []Event
 }
 
 // Create starts a new session under a minted id in dir.
@@ -83,11 +85,15 @@ func Open(path string) (*Log, []Event, error) {
 		f.Close()
 		return nil, nil, err
 	}
+	if err := truncateTornTail(f, path); err != nil {
+		f.Close()
+		return nil, nil, err
+	}
 	seq := 0
 	if n := len(events); n > 0 {
 		seq = events[n-1].Seq
 	}
-	return &Log{f: f, path: path, seq: seq}, events, nil
+	return &Log{f: f, path: path, seq: seq, events: append([]Event(nil), events...)}, events, nil
 }
 
 // lock takes an exclusive advisory lock on the session file itself. The
@@ -129,6 +135,10 @@ func (l *Log) Observe(fn func(Event)) { l.obs = fn }
 func (l *Log) Append(t Type, data any) (Event, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.appendLocked(t, data)
+}
+
+func (l *Log) appendLocked(t Type, data any) (Event, error) {
 	raw, err := json.Marshal(data)
 	if err != nil {
 		return Event{}, fmt.Errorf("marshal %s: %w", t, err)
@@ -142,10 +152,52 @@ func (l *Log) Append(t Type, data any) (Event, error) {
 	if _, err := l.f.Write(append(line, '\n')); err != nil {
 		return Event{}, fmt.Errorf("append %s: %w", l.path, err)
 	}
+	l.events = append(l.events, e)
 	if l.obs != nil {
 		l.obs(e)
 	}
 	return e, nil
+}
+
+// AppendSealed writes a structured record and a digest of the exact log prefix
+// containing it. Both writes are fsynced before success is returned. A crash
+// between them leaves an explicitly unverifiable record rather than a record
+// replay could mistake for durable evidence.
+func (l *Log) AppendSealed(t Type, data any) (Event, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	record, err := l.appendLocked(t, data)
+	if err != nil {
+		return Event{}, err
+	}
+	if err := l.f.Sync(); err != nil {
+		return Event{}, fmt.Errorf("sync record in %s: %w", l.path, err)
+	}
+	digest, err := PrefixDigest(l.events)
+	if err != nil {
+		return Event{}, err
+	}
+	if _, err := l.appendLocked(Seal, SealData{Through: record.Seq, SHA256: digest}); err != nil {
+		return Event{}, err
+	}
+	if err := l.f.Sync(); err != nil {
+		return Event{}, fmt.Errorf("sync seal in %s: %w", l.path, err)
+	}
+	return record, nil
+}
+
+// PrefixDigest hashes events exactly as they appear in a session JSONL file.
+func PrefixDigest(events []Event) (string, error) {
+	h := sha256.New()
+	for _, e := range events {
+		line, err := json.Marshal(e)
+		if err != nil {
+			return "", err
+		}
+		h.Write(line)
+		h.Write([]byte{'\n'})
+	}
+	return fmt.Sprintf("sha256:%x", h.Sum(nil)), nil
 }
 
 // Sync fsyncs the file.
@@ -178,10 +230,16 @@ func ReadFile(path string) ([]Event, error) {
 		if err != nil && !atEOF {
 			return nil, err
 		}
+		// An Ask event is one newline-terminated JSON value. Even if a final
+		// fragment happens to be valid JSON, without its newline the writer did
+		// not complete the append and it is a torn event, not history.
+		if atEOF && len(line) > 0 {
+			return events, nil
+		}
 		if len(bytes.TrimSpace(line)) > 0 {
 			var e Event
 			if jerr := json.Unmarshal(line, &e); jerr != nil {
-				if atEOF || !more(r) {
+				if atEOF {
 					return events, nil // torn tail
 				}
 				return events, fmt.Errorf("%s: corrupt event after seq %d: %w", path, lastSeq(events), jerr)
@@ -194,9 +252,49 @@ func ReadFile(path string) ([]Event, error) {
 	}
 }
 
-func more(r *bufio.Reader) bool {
-	_, err := r.Peek(1)
-	return err == nil
+// truncateTornTail discards bytes after the final newline before a locked log
+// is continued. Those bytes were never a complete event; leaving them in place
+// would splice the next append onto corruption and destroy replay permanently.
+func truncateTornTail(f *os.File, path string) error {
+	info, err := f.Stat()
+	if err != nil || info.Size() == 0 {
+		return err
+	}
+	r, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	var last [1]byte
+	if _, err := r.ReadAt(last[:], info.Size()-1); err != nil {
+		return err
+	}
+	if last[0] == '\n' {
+		return nil
+	}
+	const chunkSize = 4096
+	buf := make([]byte, chunkSize)
+	for end := info.Size(); end > 0; {
+		start := end - chunkSize
+		if start < 0 {
+			start = 0
+		}
+		n, err := r.ReadAt(buf[:end-start], start)
+		if err != nil && err != io.EOF {
+			return err
+		}
+		if i := bytes.LastIndexByte(buf[:n], '\n'); i >= 0 {
+			if err := f.Truncate(start + int64(i) + 1); err != nil {
+				return fmt.Errorf("repair torn tail in %s: %w", path, err)
+			}
+			return nil
+		}
+		end = start
+	}
+	if err := f.Truncate(0); err != nil {
+		return fmt.Errorf("repair torn tail in %s: %w", path, err)
+	}
+	return nil
 }
 
 func lastSeq(events []Event) int {
