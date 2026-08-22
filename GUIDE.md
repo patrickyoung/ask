@@ -285,7 +285,7 @@ ask note -s source 'text'      append a record, not a message
 
 -q          suppress progress on stderr; errors still print
 -json       emit raw events instead of the normal answer
--effort     off, low, medium, or high; mapping varies by provider
+-effort     off, low, medium, high, or xhigh; mapping varies by provider
 -max-tokens maximum output tokens; default 16384; refused by openai-codex
 -m          provider/model
 

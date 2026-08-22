@@ -218,15 +218,17 @@ Reasoning effort:
 .IR off ,
 .IR low ,
 .IR medium ,
+.IR high ,
 or
-.IR high .
+.IR xhigh .
 The default leaves the effort level to the provider. OpenAI and OpenRouter
 receive explicit
 .IR low ,
 .IR medium ,
+.IR high ,
 and
-.I high
-levels. Anthropic and Gemini do not distinguish those three levels; each
+.I xhigh
+levels. Anthropic and Gemini do not distinguish those levels; each
 enables the same thinking configuration. For OpenRouter,
 .I off
 omits the reasoning parameter rather than sending an explicit disable value.

@@ -1004,6 +1004,9 @@ func TestVersionAndEffortValidation(t *testing.T) {
 	if code, stdout, _ := exec(t, "", "version"); code != 0 || !strings.HasPrefix(stdout, "ask ") {
 		t.Errorf("version: exit %d, stdout %q", code, stdout)
 	}
+	if code, _, stderr := exec(t, "", "-effort", "xhigh", "hi"); code != 0 {
+		t.Errorf("xhigh effort: exit %d, stderr %q", code, stderr)
+	}
 	code, _, stderr := exec(t, "", "-effort", "sideways", "hi")
 	if code != 1 || !strings.Contains(stderr, "-effort must be") {
 		t.Errorf("bad effort: exit %d, stderr %q", code, stderr)

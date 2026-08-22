@@ -146,6 +146,7 @@ func TestGeminiParams(t *testing.T) {
 
 func TestOpenAIParams(t *testing.T) {
 	r := req("openai")
+	r.Effort = "xhigh"
 	items := `[{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"blob"},{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"a.txt","annotations":[]}]}]`
 	r.Messages[1].Blocks = append(r.Messages[1].Blocks, Block{Type: Opaque, Provider: "openai", Raw: json.RawMessage(items)})
 
@@ -161,6 +162,7 @@ func TestOpenAIParams(t *testing.T) {
 		`"encrypted_content":"blob"`,                // opaque items replayed raw
 		`"include":["reasoning.encrypted_content"]`, // encrypted reasoning requested
 		`"summary":"auto"`,                          // reasoning summaries on
+		`"effort":"xhigh"`,                          // explicit effort passes through
 		`"instructions":"be brief"`,                 // system → instructions
 	} {
 		if !strings.Contains(s, want) {

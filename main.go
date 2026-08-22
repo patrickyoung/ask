@@ -73,8 +73,8 @@ flags:
   -c            continue the current conversation
   -f file       named session; continue it if it exists, create it otherwise
   -d dir        conversation directory ($ASK_DIR, or ~/.ask/sessions)
-  -effort e     reasoning effort: off, low, medium, high; provider mapping
-                varies (default: the provider's own)
+  -effort e     reasoning effort: off, low, medium, high, xhigh; provider
+                mapping varies (default: the provider's own)
   -max-tokens n max output tokens (default 16384). openai-codex does not
                 support this flag and refuses it
   -schema file  constrain the answer with JSON Schema ("-" reads stdin)
@@ -227,7 +227,7 @@ func cmdAsk(args []string) int {
 		continuing = fs.Bool("c", false, "continue the current conversation")
 		file       = fs.String("f", "", "session log file")
 		dir        = fs.String("d", askDir(), "conversation directory")
-		effort     = fs.String("effort", "", "reasoning effort: off, low, medium, high")
+		effort     = fs.String("effort", "", "reasoning effort: off, low, medium, high, xhigh")
 		maxTokens  = fs.Int("max-tokens", 16384, "max output tokens")
 		schemaFile = fs.String("schema", "", "JSON Schema for the answer ('-' reads stdin)")
 		jsonOut    = fs.Bool("json", false, "emit raw events on stdout")
@@ -252,9 +252,9 @@ func cmdAsk(args []string) int {
 		}
 	})
 	switch *effort {
-	case "", "off", "low", "medium", "high":
+	case "", "off", "low", "medium", "high", "xhigh":
 	default:
-		return fail(fmt.Errorf("-effort must be off, low, medium, or high, got %q", *effort))
+		return fail(fmt.Errorf("-effort must be off, low, medium, high, or xhigh, got %q", *effort))
 	}
 	var outputSchema *structuredOutput
 	if *schemaFile != "" {
