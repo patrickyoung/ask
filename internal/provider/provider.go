@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"iter"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -70,7 +71,33 @@ func schemaObject(raw json.RawMessage) map[string]any {
 	dec.UseNumber()
 	var object map[string]any
 	_ = dec.Decode(&object) // loadSchema admitted one JSON object
-	return object
+	return schemaNumbers(object).(map[string]any)
+}
+
+// schemaNumbers keeps JSON numbers numeric at SDK boundaries. encoding/json's
+// json.Number preserves exact source bytes, but the OpenAI SDK treats that
+// string-backed type as a JSON string inside map[string]any. Provider SDKs
+// normalize arbitrary schema maps through their generic JSON representation,
+// so use the concrete numeric type they support. Request keeps the raw schema
+// byte-exact for logging and replay.
+func schemaNumbers(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		for key, value := range x {
+			x[key] = schemaNumbers(value)
+		}
+		return x
+	case []any:
+		for i, value := range x {
+			x[i] = schemaNumbers(value)
+		}
+		return x
+	case json.Number:
+		n, _ := strconv.ParseFloat(string(x), 64) // loadSchema admitted a JSON number
+		return n
+	default:
+		return v
+	}
 }
 
 // Logged returns the form of r that enters the session log: the messages

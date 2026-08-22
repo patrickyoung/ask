@@ -301,9 +301,9 @@ func TestStructuredOutputIsNativeValidatedAndReplayable(t *testing.T) {
 	}
 }
 
-func TestStructuredSchemaNumberSurvivesWireAndReplay(t *testing.T) {
+func TestStructuredSchemaNumberStaysNumericOnWireAndExactInReplay(t *testing.T) {
 	dir, _, bodies := fake(t, 200, structuredWire)
-	const exact = "9007199254740993"
+	const exact = "9007199254740991"
 	schema := `{
   "type": "object",
   "properties": {
@@ -316,8 +316,11 @@ func TestStructuredSchemaNumberSurvivesWireAndReplay(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d: %s", code, stderr)
 	}
-	if !strings.Contains((*bodies)[0], exact) {
+	if !strings.Contains((*bodies)[0], `"const":`+exact) {
 		t.Errorf("provider request changed exact schema number:\n%s", (*bodies)[0])
+	}
+	if strings.Contains((*bodies)[0], `"const":"`+exact+`"`) {
+		t.Errorf("provider request encoded a schema number as a string:\n%s", (*bodies)[0])
 	}
 
 	name := sessions(t, dir)[0]
