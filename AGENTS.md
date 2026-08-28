@@ -19,6 +19,10 @@ When changing `ask`:
   both are the same assertion; a request that records neither messages nor
   a digest is a hard error, so a lost field cannot make the check
   vacuously pass. Migrate formats, do not relax the check;
+- normalized Context JSONL on stdin remains message data, but its user event
+  carries a compact manifest over the exact in-message bytes. Never duplicate
+  the snapshot, refetch it during replay, or accept a manifest that cannot be
+  reconstructed from the message;
 - a new provider adapter earns its keep by passing `checkContract` over a
   wire fixture. Streamed text must equal the logged text blocks, and
   streamed reasoning must survive as something replayable to that same

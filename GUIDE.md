@@ -48,6 +48,13 @@ If both are present, `ask` sends the instruction followed by stdin inside
 `<stdin>` delimiters. If only stdin is present, stdin is the whole message.
 Surrounding whitespace on textual stdin is removed.
 
+If stdin is normalized `context/v1` JSONL, Ask records an evidence manifest on
+the same user event. The snapshot itself is still the message the model saw;
+the manifest adds its digest and byte location plus ordered provenance fields.
+It is an index, not a second copy and not another event stream. The same
+recognition works when Ply has already placed Context JSONL inside the standard
+`<stdin>` envelope before handing the composed turn to Ask.
+
 This is also how to provide facts the model cannot know:
 
 ```sh
@@ -218,6 +225,13 @@ ask replay -step 4         # What normalized request was made at seq 4?
 `-check` is stronger than “the JSON parses.” For every request event, it
 folds all preceding user and complete assistant events and compares that
 conversation with the recorded digest.
+
+For Context evidence, the same check reconstructs the manifest from the exact
+recorded message bytes. It therefore detects changes to the evidence snapshot
+or to indexed refs, citations, retrieval query, and connector fingerprint.
+No source is contacted during replay. Ask remains the single log writer; a
+coordinator such as Ply may append Cite's verdict through `ask note`, but Cite
+itself has no session access.
 
 Use `note` for an attributed fact that belongs in the record but should not
 become model context:

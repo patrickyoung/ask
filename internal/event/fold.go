@@ -22,6 +22,9 @@ func Fold(events []Event) ([]provider.Message, error) {
 			if err != nil {
 				return nil, err
 			}
+			if err := u.CheckEvidence(); err != nil {
+				return nil, fmt.Errorf("user evidence seq %d: %w", e.Seq, err)
+			}
 			msgs = append(msgs, provider.Message{Role: provider.User, Blocks: u.Content()})
 		case Assistant:
 			t, err := As[Turn](e)
@@ -60,6 +63,15 @@ func Check(events []Event) error {
 		}
 	}
 	for i, e := range events {
+		if e.Type == User {
+			u, err := As[UserData](e)
+			if err != nil {
+				return err
+			}
+			if err := u.CheckEvidence(); err != nil {
+				return fmt.Errorf("user evidence seq %d: %w", e.Seq, err)
+			}
+		}
 		if e.Type == Note {
 			n, err := As[NoteData](e)
 			if err != nil {

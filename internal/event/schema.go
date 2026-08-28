@@ -97,7 +97,9 @@ type Header struct {
 // UserData is one message from the user. Blocks carries it in the order it
 // was given — attachments in the order they were named on the command
 // line, then the text — because that order is meaningful and only the
-// message itself knows it.
+// message itself knows it. Evidence is an optional, replay-checked index over
+// normalized Context JSONL already present in one text block; it never carries
+// a second copy of the snapshot and never changes what is folded.
 //
 // Text is what a message used to be, and is still what a text-only message
 // is: the common case stays one readable JSON string, so a session log
@@ -105,8 +107,9 @@ type Header struct {
 // are present and falls back to Text, which is also how logs written
 // before attachments existed keep replaying.
 type UserData struct {
-	Text   string           `json:"text,omitempty"`
-	Blocks []provider.Block `json:"blocks,omitempty"`
+	Text     string           `json:"text,omitempty"`
+	Blocks   []provider.Block `json:"blocks,omitempty"`
+	Evidence *EvidenceData    `json:"evidence,omitempty"`
 
 	// Source names who wrote this message when it was not the person at
 	// the terminal. Empty means argv or stdin, which is every message ask

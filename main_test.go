@@ -255,6 +255,76 @@ func TestFilterContract(t *testing.T) {
 	}
 }
 
+func TestContextStdinGetsAnEvidenceManifestInTheUserEvent(t *testing.T) {
+	dir, calls, bodies := fake(t, 200, answerWire)
+	evidence := `{"kind":"context","version":1,"source":"handbook","type":"document","id":"leave-7","title":"Paid leave","retrieved_at":"2026-08-28T12:00:00Z","content":{"text":"Twenty days"},"citation":{"locator":"handbook.md#leave","url":"https://example.test/leave"},"ref":"ctx:handbook:abc","retrieval":{"query":"paid leave?","connector":{"name":"handbook","sha256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}`
+	code, _, stderr := exec(t, evidence+"\n", "Answer from this evidence")
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	}
+	if calls.Load() != 1 || len(*bodies) != 1 || !strings.Contains((*bodies)[0], "Twenty days") {
+		t.Fatalf("provider did not receive the evidence unchanged: calls=%d bodies=%v", calls.Load(), *bodies)
+	}
+	paths := sessions(t, dir)
+	if len(paths) != 1 {
+		t.Fatalf("sessions = %v", paths)
+	}
+	events, err := event.ReadFile(filepath.Join(dir, paths[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := event.As[event.UserData](events[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Evidence == nil || len(u.Evidence.Records) != 1 ||
+		u.Evidence.Records[0].Ref != "ctx:handbook:abc" ||
+		u.Evidence.Records[0].Query != "paid leave?" {
+		t.Fatalf("evidence manifest = %+v", u.Evidence)
+	}
+	if err := event.Check(events); err != nil {
+		t.Fatalf("replay check: %v", err)
+	}
+}
+
+func TestDamagedClaimedContextFailsBeforeCreatingASession(t *testing.T) {
+	dir, calls, _ := fake(t, 200, answerWire)
+	broken := `{"kind":"context","version":1,"source":"docs","type":"document","id":"1","title":"Doc","ref":"ctx:docs:x","retrieved_at":"2026-08-28T12:00:00Z","content":"text","citation":{"locator":"x"}}` + "\n{bad"
+	code, stdout, stderr := exec(t, broken, "answer")
+	if code == 0 || stdout != "" || !strings.Contains(stderr, "context evidence line 2") {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if calls.Load() != 0 || len(sessions(t, dir)) != 0 {
+		t.Fatalf("damaged evidence reached provider or created a session: calls=%d sessions=%v", calls.Load(), sessions(t, dir))
+	}
+}
+
+func TestContextInsideComposedStdinEnvelopeGetsManifest(t *testing.T) {
+	dir, _, _ := fake(t, 200, answerWire)
+	evidence := `{"kind":"context","version":1,"source":"handbook","type":"document","id":"leave-7","title":"Paid leave","retrieved_at":"2026-08-28T12:00:00Z","content":{"text":"Twenty days"},"citation":{"locator":"handbook.md#leave","url":"https://example.test/leave"},"ref":"ctx:handbook:abc"}`
+	composed := "Work this goal\n\n<stdin>\n" + evidence + "\n</stdin>\n\n[ply: initial check did not pass]"
+	code, _, stderr := exec(t, composed)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	}
+	paths := sessions(t, dir)
+	events, err := event.ReadFile(filepath.Join(dir, paths[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := event.As[event.UserData](events[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Evidence == nil || u.Evidence.Offset != len("Work this goal\n\n<stdin>\n") ||
+		u.Evidence.Records[0].Ref != "ctx:handbook:abc" {
+		t.Fatalf("composed evidence manifest = %+v", u.Evidence)
+	}
+	if err := event.Check(events); err != nil {
+		t.Fatalf("replay check: %v", err)
+	}
+}
+
 func TestStructuredOutputIsNativeValidatedAndReplayable(t *testing.T) {
 	dir, calls, bodies := fake(t, 200, structuredWire)
 	path := writeSchema(t, numberSchema)
@@ -1131,6 +1201,20 @@ func TestDocsCoverEveryCommand(t *testing.T) {
 		}
 		if !strings.Contains(string(readme), "ask "+v) {
 			t.Errorf("verb %q is missing from README.md", v)
+		}
+	}
+}
+
+func TestDocsExplainContextEvidenceManifest(t *testing.T) {
+	for _, name := range []string{"README.md", "GUIDE.md", "ask.1"} {
+		body, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"evidence manifest", "connector fingerprint", "replay"} {
+			if !strings.Contains(string(body), want) {
+				t.Errorf("%s does not mention %s", name, want)
+			}
 		}
 	}
 }

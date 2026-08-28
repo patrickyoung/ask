@@ -70,6 +70,15 @@ With both, `ask` sends the argument text followed by stdin inside `<stdin>`
 delimiters. With stdin alone, stdin is the whole message. Surrounding
 whitespace on textual stdin is removed.
 
+Normalized `context/v1` JSONL remains ordinary message input, but Ask labels it
+in the `user` event with a compact evidence manifest. The exact content remains
+inline only once; the manifest records its byte location and SHA-256 digest and
+indexes ordered refs, sources, retrieval times, citations, queries, and
+connector fingerprints. Claimed Context input that is damaged is refused
+before a session is created. Ask also recognizes Context JSONL inside the
+standard `<stdin>` envelope when a coordinator such as Ply has already composed
+the instruction and evidence into one turn.
+
 Anything that is not a command is treated as a message. A word one edit away
 from a command is refused as a likely typo. `--` forces it to be a message:
 
@@ -207,7 +216,7 @@ A session is append-only JSONL. Each line is one event:
 | event | contents |
 | --- | --- |
 | `session` | session id, version, model, system prompt, SDK versions |
-| `user` | the user message and attachments |
+| `user` | the message, attachments, and optional Context evidence manifest |
 | `request` | normalized request fields and a digest of the folded messages |
 | `assistant` | streamed blocks, usage, model, and provider stop reason |
 | `retry` | a retryable provider failure and wait |
@@ -259,6 +268,14 @@ later edits; it attributes the record to the named local program, not to a
 remote identity or cryptographic signing key. Because the digest is stored in
 the same append-only file, it does not prove that the file was not truncated
 back to an earlier valid sealed prefix.
+
+Replay also reconstructs every Context evidence manifest from the exact bytes
+inside its user message. Changing the snapshot, digest, ordered refs, citation
+locations, query, or connector fingerprint makes the check fail. Evidence is
+inline, so replay never refreshes a source or accepts a missing external blob.
+Ask is the only session writer. Cite remains a filter with no log access; when
+Ply runs `cite evidence.jsonl` as a verifier, Ply asks Ask to append the later
+verdict as a sealed `ply.verifier/v1` note in this same history.
 
 ## System prompt
 

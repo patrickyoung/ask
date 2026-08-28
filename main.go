@@ -303,7 +303,7 @@ func cmdAsk(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	content, err := message(strings.Join(fs.Args(), " "), data, files, *spec)
+	content, evidence, err := message(strings.Join(fs.Args(), " "), data, files, *spec)
 	if err != nil {
 		return fail(err)
 	}
@@ -329,7 +329,8 @@ func cmdAsk(args []string) int {
 	}
 	c := &chat.Chat{
 		Provider: prov, Model: model, System: system(*sys, sysSet),
-		MaxTokens: *maxTokens, Effort: *effort, Schema: outputSchema.requestSchema(), Log: log,
+		MaxTokens: *maxTokens, Effort: *effort, Schema: outputSchema.requestSchema(),
+		Evidence: evidence, Log: log,
 	}
 	c.Load(events)
 
@@ -539,25 +540,80 @@ func stdinData() (data []byte, piped bool, err error) {
 // delimited as evidence, so `git diff | ask "write a commit message"` is
 // unchanged. When stdin is a PNG, it becomes an attachment instead —
 // `screencapture -x -t png - | ask "what is this?"` needs no new flag.
-func message(text string, data []byte, files []provider.Block, spec string) ([]provider.Block, error) {
+func message(text string, data []byte, files []provider.Block, spec string) ([]provider.Block, *event.EvidenceData, error) {
 	blocks := files
 	if len(data) > 0 && !isText(data) {
 		// The size bound belongs to stdinData, which is the only thing that
 		// can tell "exactly at the limit" from "more where that came from".
 		b, err := classify("stdin", data)
 		if err != nil {
-			return nil, fmt.Errorf("stdin: %w", err)
+			return nil, nil, fmt.Errorf("stdin: %w", err)
 		}
 		if err := provider.Accepts(spec, b.MediaType); err != nil {
-			return nil, fmt.Errorf("stdin: %w", err)
+			return nil, nil, fmt.Errorf("stdin: %w", err)
 		}
 		blocks = append(blocks, b)
 		data = nil
 	}
-	if t := compose(text, strings.TrimSpace(string(data))); t != "" {
+	trimmed := strings.TrimSpace(string(data))
+	var evidence *event.EvidenceData
+	if trimmed != "" {
+		block := len(blocks)
+		offset := 0
+		if text != "" {
+			offset = len(text + "\n\n<stdin>\n")
+		}
+		var claimed bool
+		var err error
+		evidence, claimed, err = event.ContextEvidence([]byte(trimmed), block, offset)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !claimed {
+			evidence, err = envelopedContextEvidence(trimmed, block)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+	if t := compose(text, trimmed); t != "" {
 		blocks = append(blocks, provider.Block{Type: provider.Text, Text: t})
 	}
-	return blocks, nil
+	return blocks, evidence, nil
+}
+
+// envelopedContextEvidence recognizes the same stdin envelope Ask and Ply use
+// when data rides with an instruction. Ply sends its composed first message on
+// stdin, so from Ask's process boundary the envelope is already present. The
+// envelope is unambiguous for Context JSONL: raw newlines inside JSON strings
+// are escaped, and a normalized record is one physical line. Text may follow
+// the envelope (for example Ply's initial-check transcript).
+func envelopedContextEvidence(text string, block int) (*event.EvidenceData, error) {
+	const open, close = "\n\n<stdin>\n", "\n</stdin>"
+	for search := 0; search < len(text); {
+		relStart := strings.Index(text[search:], open)
+		if relStart < 0 {
+			return nil, nil
+		}
+		start := search + relStart + len(open)
+		relEnd := strings.Index(text[start:], close)
+		if relEnd < 0 {
+			return nil, nil
+		}
+		end := start + relEnd
+		manifest, claimed, err := event.ContextEvidence([]byte(text[start:end]), block, start)
+		if err != nil {
+			return nil, err
+		}
+		if claimed {
+			return manifest, nil
+		}
+		// Search after this opening, not after its closing tag: if arbitrary
+		// goal text contained an opening marker, Ply's real envelope may be
+		// nested inside the candidate we just rejected.
+		search = start
+	}
+	return nil, nil
 }
 
 // compose merges an instruction and textual stdin, the way a shell user

@@ -54,6 +54,11 @@ stored as a SHA\-256 digest rather than a second copy.
 recomputes the fold and compares, which is what makes "replays exactly" a
 claim that can fail rather than a slogan.
 .PP
+For a user event carrying a Context evidence manifest, replay also rebuilds
+the manifest from the exact message bytes. It fails if the snapshot, digest,
+ordered refs, citations, query, or connector fingerprint changed. Replay does
+not contact the source or retrieve newer evidence.
+.PP
 Anything that is not a command is a message. A word one edit away from a
 command is refused as a probable typo rather than sent to the model;
 .B \-\-
@@ -65,7 +70,11 @@ Ask. Arguments are joined with spaces. Piped or redirected standard input
 becomes the message, or rides with one inside
 .I <stdin>
 delimiters when both are given. Surrounding whitespace on textual stdin is
-removed. By default this starts a new conversation; see
+removed. Normalized context/v1 JSONL is indexed on the user event with its
+byte location, SHA-256 digest, ordered citation provenance, retrieval query,
+and connector fingerprint. Its content remains inline in the message and is
+not duplicated. Damaged claimed Context input is refused before creating a
+session. By default this starts a new conversation; see
 .B \-c
 and
 .BR \-f
