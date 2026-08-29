@@ -378,7 +378,7 @@ func TestLiveContract(t *testing.T) {
 	for _, spec := range specs {
 		name, _, _ := strings.Cut(spec, "/")
 		t.Run(name, func(t *testing.T) {
-			p, model, err := New(spec)
+			p, model, err := New(spec, Options{})
 			if err != nil {
 				t.Skip(err)
 			}

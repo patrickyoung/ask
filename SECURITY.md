@@ -8,17 +8,16 @@ Please do not open a public issue for anything exploitable.
 
 ## What ask holds
 
-`ask` is a filter, not a service. It does not listen for incoming connections
-or run code on your behalf. By default, its stored credentials and automatic
-session files live under `~/.ask`:
+`ask` is a filter, not a service. It does not listen for incoming connections,
+run code on your behalf, or store OAuth credentials. Its automatic session
+files live under `~/.ask`:
 
 | path | mode | contents |
 | --- | --- | --- |
-| `~/.ask/auth.json` | 0600 | OAuth tokens and refresh metadata (`ask login`) |
 | `~/.ask/sessions/*.jsonl` | 0600 | messages, answers, attachments, and request metadata |
 
-`ASK_AUTH_FILE` and `ASK_DIR` move those defaults; an explicit `-f` session
-can live elsewhere. Directories created by `ask` use mode 0700.
+`ASK_DIR` moves that default; an explicit `-f` session can live elsewhere.
+Directories created by `ask` use mode 0700.
 
 A session log holds media attachment bytes, inlined text files, and the user
 message formed from argv and stdin. Surrounding whitespace on textual stdin
@@ -26,29 +25,19 @@ is removed when that message is formed. The resulting session is
 self-contained, so a session file deserves the same care as its inputs.
 Copying one copies everything it means.
 
-API keys are read from the environment and are never written to disk.
-Gateway tokens (`ASK_AUTH_URL`) live in memory for the life of the process.
+API keys are read from the environment and are never written to disk. OAuth
+login, refresh, rotation, resource binding, and storage belong to the separate
+`oauth` filter. `oauth with` transfers one Authorization header to Ask on an
+inherited descriptor.
 
 ## Deliberate properties
 
-- **Token endpoints must be https, except on loopback.** The request body
-  carries a client secret or a refresh token — the long-lived half of the
-  credential — and http would put it on the wire in the clear. A gateway
-  inside a corporate network is still reached across a network. Loopback is
-  the only exception, because those bytes never reach a wire; a hostname
-  that merely *resolves* to 127.0.0.1 does not qualify. This is enforced on
-  `ASK_AUTH_URL`, on `ask login -token-url`, and on a `token_url` read back
-  from the credential file, and it is checked when the endpoint is
-  configured rather than when a token expires.
-- **Token endpoints never follow redirects.** Go re-sends the body on a 307
-  or 308, so a redirect would hand the secret to another host. Stripping the
-  `Authorization` header, which the standard library does, is no help when
-  the secret is a form field. `ask` returns the redirect as an error instead.
-- **Token requests are bounded in time.** Model streams are not; bound those
-  yourself (see [GUIDE.md](GUIDE.md)).
-- **A stored rotating refresh token is spent once.** Refreshes of credentials
-  in the auth file happen under its lock, so parallel processes cannot spend
-  the same stored token and race to save different replacements.
+- **OAuth credentials enter only through a descriptor.** `-header-fd` accepts
+  one bounded HTTP Authorization header. Ask does not accept it in argv, the
+  environment, stdin, or ordinary output, and it never writes it to a session.
+- **An inherited Authorization header is origin-bound.** The first provider
+  request fixes its origin. A redirect to another origin is refused before
+  the transport attaches the credential.
 - **Attachments are typed by content, never by name.** A `.png` holding a
   shell script is a shell script. Filenames handed to the model are reduced
   to a base name with control characters stripped, so a file cannot name
@@ -62,9 +51,6 @@ Gateway tokens (`ASK_AUTH_URL`) live in memory for the life of the process.
 - **One writer per session,** enforced by a lock, because two processes
   appending to one log would interleave two conversations and break every
   digest after the first.
-- **A token passed in argv is visible in `ps`** and in shell history.
-  `ask login` says so, accepts `-` to read from stdin, and prefers
-  `-from-codex` over both.
 
 ## Not in scope
 

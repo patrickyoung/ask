@@ -273,30 +273,35 @@ func (e *Error) Overflow() bool {
 // the man page, and the completions cannot drift from the code.
 var Providers = []string{"anthropic", "openai", "openai-codex", "gemini", "openrouter"}
 
+// Options carries invocation-scoped transport inputs. Authorization is an
+// already-formed HTTP Authorization value supplied through Ask's descriptor
+// boundary; Ask never acquires, stores, or refreshes it.
+type Options struct {
+	Authorization  string
+	CodexAccountID string
+}
+
 // New returns the adapter and bare model name for a spec of the form
 // provider/model, e.g. "anthropic/your-model" or
 // "openrouter/vendor/model" (OpenRouter models keep their slash).
-// <PROVIDER>_BASE_URL replaces an adapter endpoint. ASK_AUTH_URL adds OAuth
-// bearer authentication for API-key adapters (see oauth.go); openai-codex
-// uses its stored subscription credential.
+// <PROVIDER>_BASE_URL replaces an adapter endpoint. An invocation-scoped
+// Authorization header may replace API-key authentication; openai-codex
+// requires one.
 // ANTHROPIC_VERTEX_PROJECT_ID routes anthropic models through Google
 // Vertex AI (see vertex.go).
-func New(spec string) (Provider, string, error) {
+func New(spec string, opts Options) (Provider, string, error) {
 	name, model, ok := strings.Cut(spec, "/")
 	if !ok || model == "" {
 		return nil, "", fmt.Errorf("model must be provider/model, got %q", spec)
 	}
-	gateway, err := oauthClient()
-	if err != nil {
-		return nil, "", err
-	}
+	authClient := authHeaderClient(opts.Authorization, opts.CodexAccountID, name == "openai-codex")
 	switch name {
 	case "anthropic":
 		vopts, err := vertexOptions()
 		if err != nil {
 			return nil, "", err
 		}
-		k, err := key("ANTHROPIC_API_KEY", gateway != nil || vopts != nil)
+		k, err := key("ANTHROPIC_API_KEY", authClient != nil || vopts != nil)
 		if err != nil {
 			return nil, "", err
 		}
@@ -304,38 +309,34 @@ func New(spec string) (Provider, string, error) {
 		if vopts != nil {
 			base = "" // Vertex owns the endpoint; ANTHROPIC_VERTEX_BASE_URL overrides it
 		}
-		return NewAnthropic(k, base, gateway, vopts...), model, nil
+		return NewAnthropic(k, base, authClient, vopts...), model, nil
 	case "openai":
-		k, err := key("OPENAI_API_KEY", gateway != nil)
+		k, err := key("OPENAI_API_KEY", authClient != nil)
 		if err != nil {
 			return nil, "", err
 		}
-		return NewOpenAI(k, os.Getenv("OPENAI_BASE_URL"), gateway), model, nil
+		return NewOpenAI(k, os.Getenv("OPENAI_BASE_URL"), authClient), model, nil
 	case "openai-codex":
-		hc, ok, err := storedAuthClient("openai-codex")
-		if err != nil {
-			return nil, "", err
-		}
-		if !ok {
-			return nil, "", fmt.Errorf("not logged in to openai-codex; run ask login openai-codex")
+		if authClient == nil {
+			return nil, "", fmt.Errorf("openai-codex requires -header-fd; run with oauth with PROFILE -- ask -header-fd 3")
 		}
 		base := os.Getenv("OPENAI_CODEX_BASE_URL")
 		if base == "" {
 			base = "https://chatgpt.com/backend-api/codex"
 		}
-		return NewOpenAICodex(base, hc), model, nil
+		return NewOpenAICodex(base, authClient), model, nil
 	case "gemini":
-		k, err := key("GEMINI_API_KEY", gateway != nil)
+		k, err := key("GEMINI_API_KEY", authClient != nil)
 		if err != nil {
 			return nil, "", err
 		}
-		return NewGemini(k, os.Getenv("GEMINI_BASE_URL"), gateway), model, nil
+		return NewGemini(k, os.Getenv("GEMINI_BASE_URL"), authClient), model, nil
 	case "openrouter":
-		k, err := key("OPENROUTER_API_KEY", gateway != nil)
+		k, err := key("OPENROUTER_API_KEY", authClient != nil)
 		if err != nil {
 			return nil, "", err
 		}
-		return NewOpenRouter(k, os.Getenv("OPENROUTER_BASE_URL"), gateway), model, nil
+		return NewOpenRouter(k, os.Getenv("OPENROUTER_BASE_URL"), authClient), model, nil
 	}
 	return nil, "", fmt.Errorf("unknown provider %q (want %s)", name, strings.Join(Providers, ", "))
 }

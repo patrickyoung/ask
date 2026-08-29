@@ -48,13 +48,12 @@ func TestVertexEnv(t *testing.T) {
 	}
 }
 
-// TestVertexGatewayEndToEnd drives the whole Claude Code mapping through
-// the environment: OAuth bearer from ASK_AUTH_URL, ANTHROPIC_VERTEX_BASE_URL
-// pointing at a prefixed gateway, and a dated Vertex model id. The wire
+// TestVertexGatewayEndToEnd drives the whole Claude Code mapping with a
+// descriptor-supplied bearer, ANTHROPIC_VERTEX_BASE_URL pointing at a
+// prefixed gateway, and a dated Vertex model id. The wire
 // must show the Vertex shape — model in the path, anthropic_version in
 // the body — while the stream still honors the provider contract.
 func TestVertexGatewayEndToEnd(t *testing.T) {
-	tok, _, _ := tokenServer(t, 3600)
 	var gotPath, gotAuth string
 	var gotBody map[string]json.RawMessage
 	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -69,17 +68,14 @@ func TestVertexGatewayEndToEnd(t *testing.T) {
 	}))
 	defer gw.Close()
 
-	t.Setenv("ASK_AUTH_URL", tok.URL)
-	t.Setenv("ASK_AUTH_CLIENT_ID", "cid")
-	t.Setenv("ASK_AUTH_CLIENT_SECRET", "shh")
-	t.Setenv("ASK_AUTH_REFRESH_TOKEN", "")
 	t.Setenv("ANTHROPIC_API_KEY", "") // Vertex has no vendor key
 	t.Setenv("ANTHROPIC_BASE_URL", "https://ignored.example")
 	t.Setenv("ANTHROPIC_VERTEX_PROJECT_ID", "proj")
 	t.Setenv("CLOUD_ML_REGION", "us-east5")
 	t.Setenv("ANTHROPIC_VERTEX_BASE_URL", gw.URL+"/vertex")
 
-	p, model, err := New("anthropic/claude-sonnet-4-5@20250929")
+	p, model, err := New("anthropic/claude-sonnet-4-5@20250929",
+		Options{Authorization: "Bearer from-descriptor"})
 	if err != nil {
 		t.Fatalf("New on Vertex without a vendor key: %v", err)
 	}
@@ -97,7 +93,7 @@ func TestVertexGatewayEndToEnd(t *testing.T) {
 	if gotPath != want {
 		t.Errorf("wire path = %q\nwant        %q", gotPath, want)
 	}
-	if gotAuth != "Bearer tok-1" {
+	if gotAuth != "Bearer from-descriptor" {
 		t.Errorf("wire auth = %q, want the gateway bearer", gotAuth)
 	}
 	if _, ok := gotBody["model"]; ok {

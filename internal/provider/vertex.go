@@ -24,9 +24,9 @@ import (
 //	ANTHROPIC_VERTEX_BASE_URL    optional: a gateway in place of the
 //	                             region-derived Google endpoint
 //
-// ask never holds Google credentials: auth is whatever the transport
-// carries — the ASK_AUTH_URL bearer behind a corporate gateway, or a
-// proxy that injects it. The rewrite happens below the logging layer,
+// ask never holds Google credentials: auth is whatever the invocation's
+// descriptor-backed transport carries, or what a proxy injects. The rewrite
+// happens below the logging layer,
 // so request events keep the normalized shape and replay is untouched.
 
 const vertexVersion = "vertex-2023-10-16"

@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -428,13 +427,6 @@ func TestReplayProvider(t *testing.T) {
 	}
 }
 
-func TestNewOpenAICodexRequiresStoredLogin(t *testing.T) {
-	t.Setenv("ASK_AUTH_FILE", filepath.Join(t.TempDir(), "auth.json"))
-	if _, _, err := New("openai-codex/gpt-5.1-codex"); err == nil || !strings.Contains(err.Error(), "ask login openai-codex") {
-		t.Fatalf("New openai-codex without login err = %v", err)
-	}
-}
-
 // TestOpenAICodexItemsAreNotDoubled: codex streams each completed item as
 // it lands and then repeats it in the final response. Taking both would log
 // the answer twice and send a doubled assistant turn on the next ask, so an
@@ -566,7 +558,7 @@ func TestOverflowIsToldFromTransient(t *testing.T) {
 // list what is actually supported, and that list has to come from the same
 // place New switches on.
 func TestUnknownProviderNamesTheRealOnes(t *testing.T) {
-	_, _, err := New("anthropoid/claude")
+	_, _, err := New("anthropoid/claude", Options{})
 	if err == nil {
 		t.Fatal("unknown provider accepted")
 	}
@@ -588,7 +580,7 @@ func TestProviderNamesAgree(t *testing.T) {
 		if _, ok := accepts[name]; !ok {
 			t.Errorf("provider %q has no attachment policy", name)
 		}
-		if _, _, err := New(name + "/m"); err != nil && strings.Contains(err.Error(), "unknown provider") {
+		if _, _, err := New(name+"/m", Options{}); err != nil && strings.Contains(err.Error(), "unknown provider") {
 			t.Errorf("Providers lists %q but New does not know it", name)
 		}
 	}

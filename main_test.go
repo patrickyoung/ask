@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/patrickyoung/ask/internal/auth"
 	"github.com/patrickyoung/ask/internal/event"
 	"github.com/patrickyoung/ask/internal/provider"
 )
@@ -129,8 +128,7 @@ func fake(t *testing.T, status int, body string) (dir string, calls *atomic.Int3
 	t.Setenv("ANTHROPIC_API_KEY", "k")
 	t.Setenv("ANTHROPIC_BASE_URL", srv.URL)
 	t.Setenv("ANTHROPIC_VERTEX_PROJECT_ID", "")
-	t.Setenv("ASK_AUTH_URL", "")
-	t.Setenv("ASK_AUTH_FILE", filepath.Join(t.TempDir(), "auth.json"))
+	t.Setenv("OPENAI_CODEX_ACCOUNT_ID", "")
 	t.Setenv("NO_COLOR", "1")
 	return dir, calls, bodies
 }
@@ -1231,8 +1229,7 @@ func TestDocsCoverEveryFlag(t *testing.T) {
 	man := strings.ReplaceAll(string(raw), `\`, "")
 	for _, f := range []string{
 		"-m", "-S", "-c", "-a", "-f", "-d", "-effort", "-max-tokens",
-		"-schema", "-json", "-q", "-check", "-step", "-s", "-from-codex",
-		"-access-token", "-refresh-token", "-token-url", "-client-id", "-scope", "-expires",
+		"-header-fd", "-schema", "-json", "-q", "-check", "-step", "-s",
 	} {
 		if !strings.Contains(usageText, f+" ") && !strings.Contains(usageText, f+"\n") {
 			t.Errorf("flag %s is missing from ask help", f)
@@ -1312,12 +1309,11 @@ func TestEnvVarsAreDocumented(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, v := range []string{
-		"ASK_MODEL", "ASK_SYSTEM", "ASK_DIR", "ASK_AUTH_FILE", "ASK_AUTH_URL",
-		"ASK_AUTH_CLIENT_ID", "ASK_AUTH_CLIENT_SECRET", "ASK_AUTH_REFRESH_TOKEN", "ASK_AUTH_SCOPE",
+		"ASK_MODEL", "ASK_SYSTEM", "ASK_DIR",
 		"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY",
 		"ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "OPENAI_CODEX_BASE_URL", "GEMINI_BASE_URL", "OPENROUTER_BASE_URL",
 		"ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_BASE_URL",
-		"CODEX_HOME", "NO_COLOR",
+		"OPENAI_CODEX_ACCOUNT_ID", "NO_COLOR",
 	} {
 		if !strings.Contains(string(man), v) {
 			t.Errorf("%s is not documented in ask.1", v)
@@ -1581,71 +1577,74 @@ func TestSecondInterruptKills(t *testing.T) {
 	}
 }
 
-// TestLoginRefusesCleartextTokenEndpoint: refusing at login is the whole
-// point of checking here as well as at use. The operator finds out while
-// they are looking at the command that was wrong, and nothing is written —
-// a credential file that exists is a credential file someone will trust.
-func TestLoginRefusesCleartextTokenEndpoint(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "auth.json")
-	t.Setenv("ASK_AUTH_FILE", p)
-	code, stdout, stderr := exec(t, "", "login", "openai-codex",
-		"-refresh-token", "r-0", "-token-url", "http://idp.corp/oauth/token")
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1. stderr:\n%s", code, stderr)
-	}
-	if !strings.Contains(stderr, "in the clear") {
-		t.Errorf("stderr does not say why:\n%s", stderr)
-	}
-	if stdout != "" {
-		t.Errorf("stdout = %q, want empty on refusal", stdout)
-	}
-	if _, err := os.Stat(p); err == nil {
-		t.Error("a refused login wrote a credential file anyway")
-	}
-}
+func TestAuthorizationDescriptorReachesProviderButNotSession(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, answerWire)
+	}))
+	defer srv.Close()
 
-// TestLoginStoresAndLogsOut walks the credential commands the way a person
-// does — in, listed, out — and checks the file mode on the way past. A
-// token given in argv is visible in ps, which is why help offers "-";
-// that path is exercised here too.
-func TestLoginStoresAndLogsOut(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "auth.json")
-	t.Setenv("ASK_AUTH_FILE", p)
+	dir := t.TempDir()
+	t.Setenv("ASK_DIR", dir)
+	t.Setenv("ASK_MODEL", "anthropic/test-model")
+	t.Setenv("ASK_SYSTEM", "be terse")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_BASE_URL", srv.URL)
+	t.Setenv("ANTHROPIC_VERTEX_PROJECT_ID", "")
+	t.Setenv("NO_COLOR", "1")
 
-	if code, _, stderr := exec(t, "tok-from-stdin\n", "login", "openai-codex", "-access-token", "-"); code != 0 {
-		t.Fatalf("login exit = %d: %s", code, stderr)
-	}
-	fi, err := os.Stat(p)
+	read, write, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := fi.Mode().Perm(); perm != 0o600 {
-		t.Errorf("auth file mode is %04o, want 0600", perm)
+	if _, err := io.WriteString(write, "Authorization: Bearer descriptor-secret\n"); err != nil {
+		t.Fatal(err)
 	}
-	cred, ok, err := auth.Get("openai-codex")
-	if err != nil || !ok {
-		t.Fatalf("Get = %v, %v", ok, err)
+	write.Close()
+	code, stdout, stderr := exec(t, "", "-header-fd", fmt.Sprint(read.Fd()), "hi")
+	if code != 0 || stdout != "the answer\n" {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
-	if cred.AccessToken != "tok-from-stdin" {
-		t.Errorf("stored access token = %q; the trailing newline should be trimmed", cred.AccessToken)
+	if got != "Bearer descriptor-secret" {
+		t.Fatalf("provider Authorization = %q", got)
 	}
+	raw, err := os.ReadFile(filepath.Join(dir, sessions(t, dir)[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("descriptor-secret")) {
+		t.Fatal("authorization credential entered the session log")
+	}
+}
 
-	code, stdout, _ := exec(t, "", "auth")
-	if code != 0 || !strings.Contains(stdout, "openai-codex") {
-		t.Errorf("ask auth exit = %d, stdout = %q", code, stdout)
+func TestInvalidAuthorizationDescriptorLeavesNoSession(t *testing.T) {
+	dir, calls, _ := fake(t, 200, answerWire)
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(stdout, "tok-from-stdin") {
-		t.Error("ask auth printed the token itself; it lists providers, not secrets")
+	_, _ = io.WriteString(write, "X-Secret: should-not-travel\n")
+	write.Close()
+	code, stdout, stderr := exec(t, "", "-header-fd", fmt.Sprint(read.Fd()), "hi")
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "must be an Authorization header") {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
+	if calls.Load() != 0 || len(sessions(t, dir)) != 0 {
+		t.Fatal("invalid authorization reached the provider or created a session")
+	}
+	if strings.Contains(stderr, "should-not-travel") {
+		t.Fatal("invalid credential material appeared in diagnostics")
+	}
+}
 
-	if code, _, stderr := exec(t, "", "logout", "openai-codex"); code != 0 {
-		t.Fatalf("logout exit = %d: %s", code, stderr)
-	}
-	if _, ok, _ := auth.Get("openai-codex"); ok {
-		t.Error("logout left the credential behind")
-	}
-	if _, stdout, _ := exec(t, "", "auth"); !strings.Contains(stdout, "no stored credentials") {
-		t.Errorf("after logout, ask auth says %q", stdout)
+func TestRetiredCredentialCommandsPointToOAuth(t *testing.T) {
+	for _, command := range []string{"login", "logout", "auth"} {
+		code, stdout, stderr := exec(t, "", command)
+		if code != 1 || stdout != "" || !strings.Contains(stderr, "oauth with") {
+			t.Errorf("ask %s: exit=%d stdout=%q stderr=%q", command, code, stdout, stderr)
+		}
 	}
 }
 

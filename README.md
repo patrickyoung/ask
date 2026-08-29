@@ -47,15 +47,16 @@ The model syntax is `provider/model`. The supported providers are:
 OpenRouter model names retain their slash, for example
 `openrouter/anthropic/your-model`.
 
-`openai-codex` uses a ChatGPT subscription login instead of an API key:
+OAuth credentials come from the separate `oauth` filter. Ask receives one
+Authorization header on an inherited descriptor and never logs in, stores a
+token, or refreshes one:
 
 ```sh
-ask login openai-codex -from-codex
-ask auth
+oauth with llm -- ask -header-fd 3 -m openai/your-model 'Hello.'
 ```
 
-The import reads the official Codex CLI login. Use a model available to that
-account.
+The same boundary serves `openai-codex`. Set `OPENAI_CODEX_ACCOUNT_ID` when
+that account requires its non-secret routing id.
 
 ## Input
 
@@ -300,9 +301,6 @@ API-key providers read:
 - `GEMINI_API_KEY`
 - `OPENROUTER_API_KEY`
 
-Stored credentials use `~/.ask/auth.json`, or `$ASK_AUTH_FILE`. See
-[SECURITY.md](SECURITY.md) for what is stored and how it is protected.
-
 Each provider endpoint can be replaced with a corresponding base URL:
 
 - `ANTHROPIC_BASE_URL`
@@ -311,12 +309,19 @@ Each provider endpoint can be replaced with a corresponding base URL:
 - `GEMINI_BASE_URL`
 - `OPENROUTER_BASE_URL`
 
-For an OAuth-authenticated gateway in front of an API-key provider, set
-`ASK_AUTH_URL` and, as needed,
-`ASK_AUTH_CLIENT_ID`, `ASK_AUTH_CLIENT_SECRET`, `ASK_AUTH_REFRESH_TOKEN`, and
-`ASK_AUTH_SCOPE`. Token endpoints must use HTTPS except on loopback. Token
-requests have a 30-second timeout and never follow redirects. `openai-codex`
-continues to use its stored subscription credential.
+For OAuth, log in once with the independent
+[`oauth`](https://github.com/patrickyoung/oauth) filter, then compose it with
+Ask. The access token travels only through descriptor 3:
+
+```sh
+oauth with llm -- ask -header-fd 3 -m anthropic/your-model 'Hello.'
+```
+
+`-header-fd` also works with `ask compact`. An inherited authorization header
+makes the corresponding vendor API key optional. Ask binds the header to the
+first provider origin and refuses to send it across a redirect. Token login,
+refresh, rotation, resource binding, and durable credential storage remain
+OAuth's work.
 
 Anthropic models can use the Vertex wire format:
 
@@ -326,7 +331,8 @@ export CLOUD_ML_REGION=us-east5
 ```
 
 `ANTHROPIC_VERTEX_BASE_URL` overrides the derived Vertex endpoint. `ask` does
-not obtain Google credentials; use `ASK_AUTH_URL` or a proxy that adds them.
+not obtain Google credentials; use `oauth with ... -- ask -header-fd 3 ...` or
+a proxy that adds them.
 
 ## Commands
 
@@ -336,9 +342,6 @@ ask replay [flags] [session]    render, inspect, or check a session
 ask compact [flags] [session]   continue a full session from a handoff
 ask note -s src [flags] [text]  append text or sealed structured JSON
 ask system                      print the built-in system prompt
-ask login openai-codex [flags]  store subscription credentials
-ask logout <provider>           remove stored credentials
-ask auth [list]                 list stored credentials
 ask version                     print the version
 ask help                        print the built-in summary
 ```

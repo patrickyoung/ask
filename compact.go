@@ -47,9 +47,10 @@ Write notes to a colleague, not a report about a conversation: "the parser rejec
 func cmdCompact(args []string) int {
 	fs := flag.NewFlagSet("compact", flag.ContinueOnError)
 	var (
-		dir   = fs.String("d", askDir(), "conversation directory")
-		mspec = fs.String("m", "", "summarizer provider/model")
-		quiet = fs.Bool("q", false, "no progress on stderr; errors still print")
+		dir      = fs.String("d", askDir(), "conversation directory")
+		mspec    = fs.String("m", "", "summarizer provider/model")
+		headerFD = fs.Int("header-fd", -1, "descriptor containing an HTTP Authorization header")
+		quiet    = fs.Bool("q", false, "no progress on stderr; errors still print")
 	)
 	usage(fs, "ask compact [flags] [session]")
 	if err := fs.Parse(args); err != nil {
@@ -74,7 +75,13 @@ func cmdCompact(args []string) int {
 	if *mspec == "" {
 		return fail(errors.New("session names no model: pass -m provider/model"))
 	}
-	prov, model, err := provider.New(*mspec)
+	authorization, err := readAuthorizationFD(*headerFD)
+	if err != nil {
+		return fail(err)
+	}
+	prov, model, err := provider.New(*mspec, provider.Options{
+		Authorization: authorization, CodexAccountID: os.Getenv("OPENAI_CODEX_ACCOUNT_ID"),
+	})
 	if err != nil {
 		return fail(err)
 	}

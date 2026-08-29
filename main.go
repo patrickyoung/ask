@@ -22,15 +22,13 @@ import (
 	"slices"
 	"strings"
 	"syscall"
-	"time"
 
-	"github.com/patrickyoung/ask/internal/auth"
 	"github.com/patrickyoung/ask/internal/chat"
 	"github.com/patrickyoung/ask/internal/event"
 	"github.com/patrickyoung/ask/internal/provider"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 const usageText = `ask — put a question through a language model, get the answer on stdout
 
@@ -39,9 +37,6 @@ const usageText = `ask — put a question through a language model, get the answ
   ask compact [flags] [session]   continue a full conversation in a fresh one
   ask note -s src [flags] [text]  record text or sealed structured JSON
   ask system                      print the built-in system prompt
-  ask login openai-codex [flags]  store subscription auth (-from-codex)
-  ask logout <provider>           remove stored credentials
-  ask auth [list]                 list stored credential providers
   ask version                     print the version (-V, --version)
   ask help                        print this summary (-h, --help)
 
@@ -77,12 +72,15 @@ flags:
                 mapping varies (default: the provider's own)
   -max-tokens n max output tokens (default 16384). openai-codex does not
                 support this flag and refuses it
+  -header-fd n  descriptor containing one HTTP Authorization header;
+                use: oauth with PROFILE -- ask -header-fd 3 ...
   -schema file  constrain the answer with JSON Schema ("-" reads stdin)
   -json         emit this invocation's raw events instead of the answer
   -q            no progress on stderr; errors still print
 compact only:
   -m spec       summarizer provider/model (default: the session's own)
   -d dir        conversation directory ($ASK_DIR)
+  -header-fd n  descriptor containing one HTTP Authorization header
   -q            no progress on stderr; errors still print
                 The note lands as the first message of a new session,
                 stamped source=summary, with the parent and the
@@ -98,27 +96,12 @@ note only:
   -f file       session to append to (default: current)
   -d dir        conversation directory ($ASK_DIR)
   -q            no progress on stderr; errors still print
-login only:
-  -from-codex       import auth from the official Codex CLI — the usual path
-  -access-token t   store this access token ('-' reads stdin)
-  -refresh-token t  store this refresh token ('-' reads stdin; only one may)
-  -token-url u      OAuth token endpoint used to refresh
-  -client-id i      OAuth client id sent when refreshing
-  -scope s          OAuth scope sent when refreshing
-  -expires d        access token lifetime, e.g. 1h
-                    A token in argv shows up in ps and in shell history:
-                    prefer stdin, and -from-codex over both.
-
 keys: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY
-stored auth: ~/.ask/auth.json (or ASK_AUTH_FILE) for openai-codex/<model>;
-  CODEX_HOME selects the Codex CLI directory used by -from-codex
 env: ASK_MODEL (-m) · ASK_SYSTEM (-S) · ASK_DIR (-d) · NO_COLOR
 gateway: ANTHROPIC_BASE_URL · OPENAI_BASE_URL · OPENAI_CODEX_BASE_URL ·
-  GEMINI_BASE_URL · OPENROUTER_BASE_URL replace provider endpoints;
-  ASK_AUTH_URL adds OAuth bearer auth to API-key providers. Optional auth:
-  ASK_AUTH_CLIENT_ID · ASK_AUTH_CLIENT_SECRET · ASK_AUTH_REFRESH_TOKEN ·
-  ASK_AUTH_SCOPE. Vendor keys become optional. Token endpoints must be https
-  except on loopback
+  GEMINI_BASE_URL · OPENROUTER_BASE_URL replace provider endpoints. Supply
+  OAuth through -header-fd; OPENAI_CODEX_ACCOUNT_ID supplies its non-secret
+  account routing id when that provider requires one
 vertex: ANTHROPIC_VERTEX_PROJECT_ID + CLOUD_ML_REGION route anthropic/ models
   through Google Vertex AI (ANTHROPIC_VERTEX_BASE_URL overrides the endpoint)
 exit: 0 answered · 1 error · 2 context window full · 130 interrupted
@@ -139,18 +122,17 @@ func run(args []string) int {
 			return cmdCompact(args[1:])
 		case "note":
 			return cmdNote(args[1:])
-		case "login":
-			return cmdLogin(args[1:])
-		case "logout":
-			return cmdLogout(args[1:])
-		case "auth":
-			return cmdAuth(args[1:])
 		case "version", "-V", "--version":
 			fmt.Printf("ask %s\n", version)
 			return 0
 		case "help", "-h", "--help":
 			fmt.Print(usageText)
 			return 0
+		}
+		if slices.Contains(retiredVerbs, args[0]) {
+			fmt.Fprintf(os.Stderr, "ask: %s was removed; OAuth credentials belong to the oauth filter\n", args[0])
+			fmt.Fprintln(os.Stderr, "ask: run oauth with PROFILE -- ask -header-fd 3 ...")
+			return 1
 		}
 		if v := nearVerb(args[0]); v != "" {
 			fmt.Fprintf(os.Stderr, "ask: unknown command %q — did you mean %q?\n", args[0], v)
@@ -162,7 +144,8 @@ func run(args []string) int {
 }
 
 // verbs is ask's command set, named once for the typo guard.
-var verbs = []string{"replay", "compact", "note", "system", "login", "logout", "auth", "version", "help"}
+var verbs = []string{"replay", "compact", "note", "system", "version", "help"}
+var retiredVerbs = []string{"login", "logout", "auth"}
 
 // nearVerb returns the command a bare first word was probably meant to be,
 // or "" if it was probably just a message. Asking is the default action and
@@ -229,6 +212,7 @@ func cmdAsk(args []string) int {
 		dir        = fs.String("d", askDir(), "conversation directory")
 		effort     = fs.String("effort", "", "reasoning effort: off, low, medium, high, xhigh")
 		maxTokens  = fs.Int("max-tokens", 16384, "max output tokens")
+		headerFD   = fs.Int("header-fd", -1, "descriptor containing an HTTP Authorization header")
 		schemaFile = fs.String("schema", "", "JSON Schema for the answer ('-' reads stdin)")
 		jsonOut    = fs.Bool("json", false, "emit raw events on stdout")
 		quiet      = fs.Bool("q", false, "no progress on stderr; errors still print")
@@ -288,7 +272,13 @@ func cmdAsk(args []string) int {
 	if maxTokensSet && strings.HasPrefix(*spec, "openai-codex/") {
 		return fail(errors.New("-max-tokens is not supported by openai-codex"))
 	}
-	prov, model, err := provider.New(*spec)
+	authorization, err := readAuthorizationFD(*headerFD)
+	if err != nil {
+		return fail(err)
+	}
+	prov, model, err := provider.New(*spec, provider.Options{
+		Authorization: authorization, CodexAccountID: os.Getenv("OPENAI_CODEX_ACCOUNT_ID"),
+	})
 	if err != nil {
 		return fail(err)
 	}
@@ -766,135 +756,6 @@ func sessionPath(dir, arg string) (string, error) {
 func jsonEvents(w io.Writer) func(event.Event) {
 	enc := json.NewEncoder(w)
 	return func(e event.Event) { enc.Encode(e) }
-}
-
-func cmdAuth(args []string) int {
-	if len(args) == 0 || args[0] == "list" {
-		s, p, err := auth.Load()
-		if err != nil {
-			return fail(err)
-		}
-		fmt.Fprintf(os.Stderr, "auth file: %s\n", p)
-		if len(s.Providers) == 0 {
-			fmt.Println("no stored credentials")
-			return 0
-		}
-		var names []string
-		for name := range s.Providers {
-			names = append(names, name)
-		}
-		slices.Sort(names)
-		for _, name := range names {
-			c := s.Providers[name]
-			state := "access-token"
-			if c.AccessToken == "" && c.RefreshToken != "" {
-				state = "refresh-token"
-			}
-			if !c.Expiry.IsZero() {
-				state += " expires " + c.Expiry.Format(time.RFC3339)
-			}
-			fmt.Printf("%s\t%s\n", name, state)
-		}
-		return 0
-	}
-	return fail(errors.New("usage: ask auth [list]"))
-}
-
-func cmdLogout(args []string) int {
-	if len(args) != 1 {
-		return fail(errors.New("usage: ask logout <provider>"))
-	}
-	if err := auth.Delete(args[0]); err != nil {
-		return fail(err)
-	}
-	fmt.Println("logged out " + args[0])
-	return 0
-}
-
-func cmdLogin(args []string) int {
-	fs := flag.NewFlagSet("login", flag.ContinueOnError)
-	var access, refresh, tokenURL, clientID, scope string
-	var fromCodex bool
-	var expires time.Duration
-	fs.StringVar(&access, "access-token", "", "access token to store ('-' reads stdin)")
-	fs.StringVar(&refresh, "refresh-token", "", "refresh token to store ('-' reads stdin)")
-	fs.StringVar(&tokenURL, "token-url", "", "OAuth token endpoint for refresh")
-	fs.StringVar(&clientID, "client-id", "", "OAuth client id for refresh")
-	fs.StringVar(&scope, "scope", "", "OAuth scope for refresh")
-	fs.BoolVar(&fromCodex, "from-codex", false, "import ChatGPT auth from the official Codex CLI auth file")
-	fs.DurationVar(&expires, "expires", 0, "access token lifetime, e.g. 1h")
-	usage(fs, "ask login openai-codex [flags]")
-	// The provider is the first positional argument, so anything flag-shaped
-	// in its place has to reach the flag set rather than be reported as an
-	// unknown provider: ask login -h asks for the usage it should get.
-	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		if err := fs.Parse(args); err != nil {
-			return usageCode(fs, err)
-		}
-		fs.SetOutput(os.Stderr) // a missing provider is misuse, not help
-		fs.Usage()
-		return 1
-	}
-	name := args[0]
-	if err := fs.Parse(args[1:]); err != nil {
-		return usageCode(fs, err)
-	}
-	if name != "openai-codex" {
-		return fail(fmt.Errorf("unknown login provider %q (want openai-codex)", name))
-	}
-	if fromCodex {
-		if access != "" || refresh != "" || tokenURL != "" || clientID != "" || scope != "" || expires != 0 {
-			return fail(errors.New("-from-codex cannot be combined with token flags"))
-		}
-		cred, path, err := auth.ImportCodex()
-		if err != nil {
-			return fail(err)
-		}
-		if err := auth.Put(name, cred); err != nil {
-			return fail(err)
-		}
-		fmt.Fprintf(os.Stderr, "imported credentials from %s\n", path)
-		fmt.Println("logged in " + name)
-		return 0
-	}
-	if access == "-" && refresh == "-" {
-		return fail(errors.New("only one token field can read from stdin"))
-	}
-	for _, p := range []*string{&access, &refresh} {
-		if *p != "-" {
-			continue
-		}
-		b, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return fail(err)
-		}
-		*p = strings.TrimSpace(string(b))
-	}
-	if access == "" && refresh == "" {
-		return fail(errors.New("login needs -from-codex, -access-token, or -refresh-token"))
-	}
-	if refresh != "" && tokenURL == "" {
-		tokenURL = auth.CodexRefreshURL
-	}
-	// Refused at login rather than at the first refresh, so a wrong endpoint
-	// is a message now instead of a surprise in a month.
-	if tokenURL != "" {
-		if err := auth.CheckTokenURL(tokenURL); err != nil {
-			return fail(err)
-		}
-	}
-	var expiry time.Time
-	if expires > 0 {
-		expiry = time.Now().Add(expires).UTC()
-	}
-	if err := auth.Put(name, auth.Credential{
-		Type: "oauth", AccessToken: access, RefreshToken: refresh,
-		Expiry: expiry, TokenURL: tokenURL, ClientID: clientID, Scope: scope,
-	}); err != nil {
-		return fail(err)
-	}
-	fmt.Println("logged in " + name)
-	return 0
 }
 
 // usage gives a flag set a synopsis line above its flag defaults, and takes

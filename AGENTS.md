@@ -70,12 +70,12 @@ When changing `ask`:
   attachment, too many of them: each is an error naming the limit. An
   answer about the first part of a file, presented as an answer about the
   file, is not something the next program in the pipe can detect;
-- credentials do not travel. A token endpoint is https except on loopback
-  (`auth.CheckTokenURL`, checked where it is configured *and* where it is
-  used), and it is fetched with `tokenClient` — bounded in time, and no
-  redirects, because the form body carries a secret that Go would re-send
-  on a 307. A rotating refresh token is spent under the credential file's
-  lock, once;
+- credentials do not travel. Ask never logs in, stores tokens, or refreshes
+  them. `-header-fd` consumes one bounded Authorization header inherited from
+  a credential filter such as `oauth with`; it never enters argv, the
+  environment, stdin, stdout, diagnostics, or the session log. The provider
+  transport binds it to the first request origin and refuses cross-origin
+  redirects;
 - run `go test ./...` — and `go test -race ./...` when touching the log or
   a stream — before reporting success;
 - keep the docs true: a new flag belongs in `ask help` and `ask.1`; a new

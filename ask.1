@@ -1,4 +1,4 @@
-.TH ASK 1 "2026-08-13" "ask 0.1.0" "General Commands Manual"
+.TH ASK 1 "2026-08-29" "ask 0.2.0" "General Commands Manual"
 .SH NAME
 ask \- put a question through a language model
 .SH SYNOPSIS
@@ -21,16 +21,6 @@ ask \- put a question through a language model
 .RI [ text ...]
 .br
 .B ask system
-.br
-.B ask login
-.I openai\-codex
-.RI [ flags ]
-.br
-.B ask logout
-.I provider
-.br
-.B ask auth
-.RI [ list ]
 .br
 .B ask version
 .br
@@ -162,18 +152,6 @@ secret, so extending it is ordinary shell rather than a config format:
 ask \-S "$(ask system; cat house\-style.md)" "..."
 .EE
 .TP
-.B ask login \fIopenai\-codex\fR [\fIflags\fR]
-Store subscription credentials in the auth file.
-.B \-from\-codex
-imports them from the official Codex CLI and is the usual path.
-.TP
-.B ask logout \fIprovider\fR
-Remove stored credentials for a provider.
-.TP
-.B ask auth \fR[\fIlist\fR]
-List stored credential providers and the state of each token. The auth
-file path goes to stderr, the entries to stdout.
-.TP
 .B ask version
 Print the version.
 .B \-V
@@ -268,6 +246,30 @@ a cut off document exits 1 and stdout stays empty.
 does not support this option; explicitly setting it is an error, and when it
 is omitted no output limit is sent.
 .TP
+.BI \-header\-fd " n"
+Read one HTTP Authorization header from inherited file descriptor
+.IR n .
+The descriptor must be 3 or greater. The input is bounded to 64 KB, may
+contain no other header, and is consumed before a new session is created.
+The credential is never written to argv, the environment, standard input,
+standard output, diagnostics, or the session log.
+.IP
+This is the boundary emitted by
+.BR "oauth with" :
+.IP
+.EX
+oauth with llm \-\- ask \-header\-fd 3 \-m openai/your\-model "Hello."
+.EE
+.IP
+Ask binds the header to the first provider request origin and refuses to
+send it across a redirect. OAuth login, refresh, rotation, resource binding,
+and credential storage belong to the
+.B oauth
+filter. An inherited header makes the provider's API key optional.
+.IP
+The option also applies to
+.BR compact .
+.TP
 .BI \-schema " file"
 Constrain the answer with the self\-contained JSON Schema in
 .IR file .
@@ -299,7 +301,8 @@ routing fields and provider wire transformations are not part of this view.
 .B compact
 takes
 .BR \-m ,
-.B \-d
+.BR \-d ,
+.B \-header\-fd
 and
 .B \-q
 with their usual meanings, except that
@@ -317,35 +320,6 @@ and
 .BR \-q .
 .B \-s
 is required and must be one word.
-.SS Login options
-.TP
-.B \-from\-codex
-Import a ChatGPT login from the official Codex CLI auth file. It cannot be
-combined with token flags.
-.TP
-.BI \-access\-token " token"
-Store an access token. A value of
-.B \-
-reads it from standard input.
-.TP
-.BI \-refresh\-token " token"
-Store a refresh token. A value of
-.B \-
-reads it from standard input. Only one token field may read stdin.
-.TP
-.BI \-token\-url " url"
-OAuth token endpoint used to refresh a stored token. It must use HTTPS,
-except on loopback.
-.TP
-.BI \-client\-id " id"
-OAuth client id sent during refresh.
-.TP
-.BI \-scope " scope"
-OAuth scope sent during refresh.
-.TP
-.BI \-expires " duration"
-Lifetime of the supplied access token, in Go duration syntax such as
-.IR 1h .
 .SH STRUCTURED OUTPUT
 .B \-schema
 passes a JSON Schema through the provider's native structured\-output field.
@@ -496,15 +470,12 @@ Default system prompt, overriding the built\-in one and overridden by
 Default for
 .BR \-d .
 .TP
-.B ASK_AUTH_FILE
-Path to the stored credential file. Default
-.IR ~/.ask/auth.json ,
-created with mode 0600.
-.TP
 .B ANTHROPIC_API_KEY\fR, \fBOPENAI_API_KEY\fR, \fBGEMINI_API_KEY\fR, \fBOPENROUTER_API_KEY
 Vendor API keys. Each is required only for the provider that uses it, and
-becomes optional behind a gateway or on Vertex, where the credential lives
-in the transport.
+becomes optional when
+.B \-header\-fd
+supplies authorization or on Vertex, where the credential lives in the
+transport.
 .TP
 .BI < PROVIDER >_BASE_URL
 Replace a provider endpoint. The exact names are
@@ -514,37 +485,6 @@ Replace a provider endpoint. The exact names are
 .BR GEMINI_BASE_URL ,
 and
 .BR OPENROUTER_BASE_URL .
-.TP
-.B ASK_AUTH_URL
-OAuth token endpoint for a gateway. Its presence enables bearer
-authentication for Anthropic, OpenAI, Gemini, and OpenRouter, including
-Anthropic requests using the Vertex wire format. The
-.B openai\-codex
-adapter continues to use its stored subscription credential.
-.B ASK_AUTH_CLIENT_ID
-and
-.B ASK_AUTH_CLIENT_SECRET
-are sent as client_secret_post form fields;
-.B ASK_AUTH_REFRESH_TOKEN
-selects the refresh_token grant instead of client_credentials; and
-.B ASK_AUTH_SCOPE
-is sent when set. Tokens are held in memory for the life of the process
-and never written to disk.
-.IP
-The endpoint must be
-.BR https ,
-except on loopback. The request body carries a client secret or a refresh
-token, so http would put the long\-lived half of the credential on the wire
-in the clear; a gateway inside a corporate network is still reached across
-a network. The same rule applies to
-.B \-token\-url
-at
-.B ask login
-and to a
-.I token_url
-already stored in the credential file, and it is checked when the endpoint
-is configured rather than only when a token expires.
-.TP
 .B ANTHROPIC_VERTEX_PROJECT_ID
 Route
 .I anthropic/
@@ -562,15 +502,17 @@ replaces the region\-derived endpoint.
 is ignored while Vertex is enabled.
 .IP
 .B ask
-does not obtain Google credentials. Use
-.B ASK_AUTH_URL
-or a proxy that adds authentication.
+does not obtain Google credentials. Compose
+.B oauth with
+and
+.B \-header\-fd 3
+or use a proxy that adds authentication.
 .TP
-.B CODEX_HOME
-Codex CLI directory used by
-.BR "ask login openai-codex -from-codex" .
-The default is
-.IR ~/.codex .
+.B OPENAI_CODEX_ACCOUNT_ID
+Non-secret ChatGPT account routing id used with
+.IR openai\-codex .
+Its Authorization header must still arrive through
+.BR \-header\-fd .
 .TP
 .B NO_COLOR
 Disable colour on stderr. Colour is used only when stderr is a terminal.
@@ -582,11 +524,6 @@ Session logs, one JSONL file per conversation, plus the
 symlink. Directories created by
 .B ask
 use mode 0700; session files use mode 0600.
-.TP
-.I ~/.ask/auth.json
-Stored credentials, created with mode 0600. The path is replaced by
-.BR $ASK_AUTH_FILE
-when set.
 .SH EXIT STATUS
 .TP
 .B 0
