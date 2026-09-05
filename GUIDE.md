@@ -33,6 +33,8 @@ Use these rules:
 
 One session has one writer. A second writer is refused because interleaved
 turns would no longer describe one conversation.
+`note` without `-f` and `compact` without a session argument also require a
+valid `current` pointer. For named threads, pass the session explicitly.
 
 ## Form the message
 
@@ -90,6 +92,8 @@ ask -q -schema finding.schema.json \
 The provider receives its native structured-output parameter. After the turn,
 `ask` parses the text and validates the value against the same schema before
 exit 0.
+Large integers and precise decimals retain their exact values in both the
+provider request and the local check.
 
 A refusal, invalid JSON, schema mismatch, or incomplete provider stop exits 1
 without emitting a normal answer. The completed provider turn remains in the
@@ -262,6 +266,12 @@ a failed stream is recorded as partial and is skipped when continuing.
 This tightens earlier behavior that could report a truncated answer as success;
 existing logs retain their original folds. Reported stdout write errors also
 exit 1; closed downstream pipes retain Unix SIGPIPE behavior.
+
+`-max-tokens` must be greater than zero. Gemini's SDK caps the value at
+2147483647; each model may impose a smaller limit. A failed session write,
+sync, or close also exits 1. If recording a retry fails, Ask stops before
+another model call. Normal stdout is emitted only after the log closes
+successfully; `-json` events may already have streamed before an I/O failure.
 
 Exit 2 has one meaning: a model context window is full. For an ask turn, do
 not retry the same session. Either start over:

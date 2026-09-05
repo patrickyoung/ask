@@ -250,6 +250,95 @@ func TestAppendSealedRoundTripAndTamperDetection(t *testing.T) {
 	}
 }
 
+func TestWriteFailurePreventsFurtherAppends(t *testing.T) {
+	log, err := Create(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	if _, err := log.Append(Session, Header{ID: log.ID(), Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	file := log.f
+	readOnly, err := os.Open(log.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readOnly.Close()
+	log.f = readOnly
+	_, first := log.Append(User, UserData{Text: "cannot write"})
+	log.f = file
+	if first == nil {
+		t.Fatal("fixture did not fail its write")
+	}
+	if _, err := log.Append(User, UserData{Text: "must not follow a failed write"}); err != first {
+		t.Fatalf("later append=%v; want original failure %v", err, first)
+	}
+	if err := log.Close(); err == nil {
+		t.Fatal("Close lost the failed write")
+	}
+	// Reopening verifies/repairs the file under a new lock. The failed append
+	// did not consume a sequence number or leave a second event behind.
+	reopened, got, err := Open(log.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if len(got) != 1 {
+		t.Fatalf("failed log acquired %d events", len(got))
+	}
+	e, err := reopened.Append(User, UserData{Text: "explicitly reopened"})
+	if err != nil || e.Seq != 2 {
+		t.Fatalf("next event=%+v err=%v", e, err)
+	}
+}
+
+func TestSyncFailurePreventsFurtherAppendsAndReleasesLock(t *testing.T) {
+	log, err := Create(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	file := log.f
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	log.f = w // fsync on a pipe must fail
+	first := log.Sync()
+	log.f = file
+	if first == nil {
+		t.Fatal("fixture did not fail its sync")
+	}
+	if _, err := log.Append(User, UserData{Text: "must not append"}); err != first {
+		t.Fatalf("append=%v; want sync failure %v", err, first)
+	}
+	if err := log.Close(); err == nil {
+		t.Fatal("Close discarded sync failure")
+	}
+	reopened, _, err := Open(log.Path())
+	if err != nil {
+		t.Fatalf("failed Close kept the writer lock: %v", err)
+	}
+	reopened.Close()
+	if err := log.Close(); err != nil {
+		t.Fatalf("deferred second close should be harmless: %v", err)
+	}
+}
+
+func TestCloseReportsUnderlyingFileFailure(t *testing.T) {
+	log, err := Create(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	log.f.Close()
+	if err := log.Close(); err == nil {
+		t.Fatal("Close discarded its underlying file error")
+	}
+}
+
 func TestOpenRefusesToAppendAfterTamperedSealedPrefix(t *testing.T) {
 	log, err := Create(t.TempDir())
 	if err != nil {

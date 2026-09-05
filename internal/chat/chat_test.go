@@ -375,6 +375,56 @@ func TestMissingStopIsPartial(t *testing.T) {
 	}
 }
 
+func TestInvalidEvidenceCannotEnterLog(t *testing.T) {
+	c, p, log := newChat(t, textTurn("unused"))
+	c.Evidence = &event.EvidenceData{Block: 0, SnapshotBytes: 1000}
+	if _, err := c.Say(context.Background(), say("short")); err == nil {
+		t.Fatal("invalid evidence was accepted")
+	}
+	if len(events(t, log)) != 0 || len(p.Requests) != 0 {
+		t.Fatal("invalid evidence was appended or sent")
+	}
+}
+
+type failingLogProvider struct {
+	log    *event.Log
+	calls  int
+	cancel context.CancelFunc
+}
+
+func (p *failingLogProvider) Stream(context.Context, provider.Request) iter.Seq2[provider.Chunk, error] {
+	return func(yield func(provider.Chunk, error) bool) {
+		p.calls++
+		p.log.Close() // request logged successfully; the next append must fail
+		if p.cancel != nil {
+			p.cancel()
+			yield(provider.Chunk{}, context.Canceled)
+		} else {
+			yield(provider.Chunk{}, &provider.Error{Status: 429, Msg: "retry me"})
+		}
+	}
+}
+
+func TestLogFailureStopsRetryAndAbort(t *testing.T) {
+	for _, cancel := range []bool{false, true} {
+		c, _, log := newChat(t)
+		ctx, stop := context.WithCancel(context.Background())
+		p := &failingLogProvider{log: log}
+		if cancel {
+			p.cancel = stop
+		}
+		c.Provider = p
+		answer, err := c.Say(ctx, say("hi"))
+		stop()
+		if answer != "" || err == nil || !strings.Contains(err.Error(), "append") {
+			t.Fatalf("cancel=%v answer=%q err=%v; want log failure", cancel, answer, err)
+		}
+		if p.calls != 1 {
+			t.Fatalf("made %d calls after losing the log", p.calls)
+		}
+	}
+}
+
 // TestDeltasReachTheDisplay: what streams to the human is what lands in
 // the log, which is the contract every adapter is held to.
 func TestDeltasReachTheDisplay(t *testing.T) {

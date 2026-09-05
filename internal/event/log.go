@@ -27,6 +27,8 @@ type Log struct {
 	path   string
 	seq    int
 	obs    func(Event)
+	err    error // first write/sync failure; no later append may follow a torn write
+	closed bool
 	events []Event
 }
 
@@ -146,19 +148,23 @@ func (l *Log) Append(t Type, data any) (Event, error) {
 }
 
 func (l *Log) appendLocked(t Type, data any) (Event, error) {
+	if l.err != nil {
+		return Event{}, l.err
+	}
 	raw, err := json.Marshal(data)
 	if err != nil {
 		return Event{}, fmt.Errorf("marshal %s: %w", t, err)
 	}
-	l.seq++
-	e := Event{Seq: l.seq, Time: time.Now().UTC(), Type: t, Data: raw}
+	e := Event{Seq: l.seq + 1, Time: time.Now().UTC(), Type: t, Data: raw}
 	line, err := json.Marshal(e)
 	if err != nil {
 		return Event{}, err
 	}
 	if _, err := l.f.Write(append(line, '\n')); err != nil {
-		return Event{}, fmt.Errorf("append %s: %w", l.path, err)
+		l.err = fmt.Errorf("append %s: %w", l.path, err)
+		return Event{}, l.err
 	}
+	l.seq = e.Seq
 	l.events = append(l.events, e)
 	if l.obs != nil {
 		l.obs(e)
@@ -177,7 +183,7 @@ func (l *Log) AppendSealed(t Type, data any) (Event, error) {
 	if err != nil {
 		return Event{}, err
 	}
-	if err := l.f.Sync(); err != nil {
+	if err := l.syncLocked(); err != nil {
 		return Event{}, fmt.Errorf("sync record in %s: %w", l.path, err)
 	}
 	digest, err := PrefixDigest(l.events)
@@ -187,7 +193,7 @@ func (l *Log) AppendSealed(t Type, data any) (Event, error) {
 	if _, err := l.appendLocked(Seal, SealData{Through: record.Seq, SHA256: digest}); err != nil {
 		return Event{}, err
 	}
-	if err := l.f.Sync(); err != nil {
+	if err := l.syncLocked(); err != nil {
 		return Event{}, fmt.Errorf("sync seal in %s: %w", l.path, err)
 	}
 	return record, nil
@@ -208,13 +214,31 @@ func PrefixDigest(events []Event) (string, error) {
 }
 
 // Sync fsyncs the file.
-func (l *Log) Sync() error { return l.f.Sync() }
+func (l *Log) Sync() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.syncLocked()
+}
 
-// Close syncs and closes the file, which releases the lock.
+func (l *Log) syncLocked() error {
+	if l.err == nil {
+		l.err = l.f.Sync()
+	}
+	return l.err
+}
+
+// Close syncs and closes the file, which releases the lock. Repeated closes
+// are harmless, so callers can check Close before stdout and defer cleanup.
 func (l *Log) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	err := l.f.Sync()
+	if l.closed {
+		return nil
+	}
+	l.closed = true
+	// Preserve the written prefix if syncing is still possible after a write
+	// failure; the original error must still reach the caller.
+	err := errors.Join(l.err, l.f.Sync())
 	return errors.Join(err, l.f.Close())
 }
 

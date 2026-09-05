@@ -44,7 +44,7 @@ From the transcript, record: what was being worked on; what was established, dec
 
 Write notes to a colleague, not a report about a conversation: "the parser rejects tabs" rather than "the user asked about the parser". Carry the facts, not the fact that they were discussed. If something was uncertain, say it is uncertain. Plain text, no preamble, no sign-off, no headings unless the material genuinely has parts.`
 
-func cmdCompact(args []string) int {
+func cmdCompact(args []string) (code int) {
 	fs := flag.NewFlagSet("compact", flag.ContinueOnError)
 	var (
 		dir      = fs.String("d", askDir(), "conversation directory")
@@ -56,8 +56,20 @@ func cmdCompact(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return usageCode(fs, err)
 	}
+	if fs.NArg() > 1 {
+		return fail(errors.New("compact takes at most one session"))
+	}
 
-	src, err := sessionPath(*dir, fs.Arg(0))
+	var src string
+	var err error
+	if fs.NArg() == 0 {
+		src, err = event.Current(*dir)
+		if err != nil {
+			return fail(fmt.Errorf("no current conversation in %s: %w", *dir, err))
+		}
+	} else {
+		src, err = sessionPath(*dir, fs.Arg(0))
+	}
 	if err != nil {
 		return fail(err)
 	}
@@ -109,7 +121,7 @@ func cmdCompact(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	defer log.Close()
+	defer closeLog(log, &code)
 	if _, err := log.Append(event.Session, event.Header{
 		ID: log.ID(), Version: version, Go: goVersion(), SDKs: sdkVersions(),
 		Model: hdr.Model, System: hdr.System, Parent: idOf(hdr, src), Summary: sumID,
@@ -123,6 +135,10 @@ func cmdCompact(args []string) int {
 	}
 	if err := log.Sync(); err != nil {
 		return fail(err)
+	}
+	closeLog(log, &code)
+	if code != 0 {
+		return code
 	}
 	// Compacting the conversation you are in moves you into the compact
 	// one, because that is the only reason to do it. Compacting some other
@@ -149,7 +165,7 @@ func summarize(ctx context.Context, dir string, prov provider.Provider, model, s
 	if err != nil {
 		return "", "", fail(err)
 	}
-	defer log.Close()
+	defer closeLog(log, &code)
 	if err := header(log, spec, summarySystem); err != nil {
 		return "", "", fail(err)
 	}
@@ -161,6 +177,12 @@ func summarize(ctx context.Context, dir string, prov provider.Provider, model, s
 		fmt.Fprintln(os.Stderr, r.dim(fmt.Sprintf("ask: summarizing %d bytes with %s", len(text), spec)))
 	}
 	note, err = c.Say(ctx, []provider.Block{{Type: provider.Text, Text: text}})
+	if err == nil && strings.TrimSpace(note) == "" {
+		err = errors.New("the summarizer returned no note")
+	}
+	if logErr := done(log, err); logErr != nil {
+		return "", "", fail(logErr)
+	}
 	switch {
 	case errors.Is(err, context.Canceled):
 		return "", "", 130
@@ -172,9 +194,6 @@ func summarize(ctx context.Context, dir string, prov provider.Provider, model, s
 		return "", "", 2
 	case err != nil:
 		return "", "", fail(err)
-	}
-	if strings.TrimSpace(note) == "" {
-		return "", "", fail(errors.New("the summarizer returned no note"))
 	}
 	return note, log.ID(), 0
 }
@@ -253,7 +272,7 @@ func idOf(h event.Header, path string) string {
 }
 
 func wasCurrent(dir, src string) bool {
-	cur, err := event.Latest(dir)
+	cur, err := event.Current(dir)
 	if err != nil {
 		return false
 	}

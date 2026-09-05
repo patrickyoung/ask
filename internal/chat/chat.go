@@ -63,7 +63,11 @@ func (c *Chat) Turns() int {
 // message is an ordered list of blocks: attachments as they were named,
 // then the text.
 func (c *Chat) Say(ctx context.Context, content []provider.Block) (string, error) {
-	if _, err := c.append(event.User, userData(content, c.Evidence)); err != nil {
+	user := userData(content, c.Evidence)
+	if err := user.CheckEvidence(); err != nil {
+		return "", err
+	}
+	if _, err := c.append(event.User, user); err != nil {
 		return "", err
 	}
 	msgs, err := event.Fold(c.events)
@@ -102,8 +106,12 @@ func (c *Chat) Say(ctx context.Context, content []provider.Block) (string, error
 			// logged as partial: Fold skips it, so continuing this session
 			// asks the same question again rather than pretending half an
 			// answer was the answer.
-			c.append(event.Abort, struct{}{})
-			c.Log.Sync()
+			if _, logErr := c.append(event.Abort, struct{}{}); logErr != nil {
+				return "", logErr
+			}
+			if logErr := c.Log.Sync(); logErr != nil {
+				return "", logErr
+			}
 			return "", ctx.Err()
 		}
 		var pe *provider.Error
@@ -174,9 +182,11 @@ func (c *Chat) stream(ctx context.Context, req provider.Request) (event.Turn, er
 			wait = time.Duration(float64(time.Second) * float64(int(1)<<attempt) * (0.5 + rand.Float64()))
 			wait = min(wait, time.Minute)
 		}
-		c.append(event.Retry, event.RetryData{
+		if _, logErr := c.append(event.Retry, event.RetryData{
 			Attempt: attempt, Status: pe.Status, WaitMS: wait.Milliseconds(), Error: pe.Msg,
-		})
+		}); logErr != nil {
+			return turn, logErr
+		}
 		select {
 		case <-time.After(wait):
 		case <-ctx.Done():

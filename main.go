@@ -15,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -72,8 +73,8 @@ flags:
   -d dir        conversation directory ($ASK_DIR, or ~/.ask/sessions)
   -effort e     reasoning effort: off, low, medium, high, xhigh; provider
                 mapping varies (default: the provider's own)
-  -max-tokens n max output tokens (default 16384). openai-codex does not
-                support this flag and refuses it
+  -max-tokens n positive max output tokens (default 16384). Gemini accepts
+                at most 2147483647; openai-codex refuses this flag
   -header-fd n  descriptor containing one HTTP Authorization header;
                 use: oauth with PROFILE -- ask -header-fd 3 ...
   -schema file  constrain the answer with JSON Schema ("-" reads stdin)
@@ -88,6 +89,7 @@ compact only:
                 stamped source=summary, with the parent and the
                 summarizer's own session named in the header. The source
                 is never touched. stdout is the new session's path.
+                Without a session argument, current must be available.
 replay only:
   -d dir        conversation directory ($ASK_DIR)
   -check        verify the replay invariant before producing output
@@ -95,7 +97,7 @@ replay only:
   -json         emit raw events; combine with -check for a verified snapshot
 note only:
   -s source     program writing the note (required, one word)
-  -f file       session to append to (default: current)
+  -f file       session to append to (default: current; must be available)
   -d dir        conversation directory ($ASK_DIR)
   -q            no progress on stderr; errors still print
   -k kind       structured record kind; requires -json and -seal
@@ -128,8 +130,14 @@ func run(args []string) int {
 		case "note":
 			return cmdNote(args[1:])
 		case "version", "-V", "--version":
+			if len(args) != 1 {
+				return fail(errors.New("version takes no arguments"))
+			}
 			return printOutput("ask " + version + "\n")
 		case "help", "-h", "--help":
+			if len(args) != 1 {
+				return fail(errors.New("help takes no arguments"))
+			}
 			return printOutput(usageText)
 		}
 		if slices.Contains(retiredVerbs, args[0]) {
@@ -205,7 +213,7 @@ func within1(a, b string) bool {
 	return false
 }
 
-func cmdAsk(args []string) int {
+func cmdAsk(args []string) (code int) {
 	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
 	var (
 		spec       = fs.String("m", os.Getenv("ASK_MODEL"), "provider/model")
@@ -214,7 +222,7 @@ func cmdAsk(args []string) int {
 		file       = fs.String("f", "", "session log file")
 		dir        = fs.String("d", askDir(), "conversation directory")
 		effort     = fs.String("effort", "", "reasoning effort: off, low, medium, high, xhigh")
-		maxTokens  = fs.Int("max-tokens", 16384, "max output tokens")
+		maxTokens  = fs.Int("max-tokens", 16384, "positive max output tokens")
 		headerFD   = fs.Int("header-fd", -1, "descriptor containing an HTTP Authorization header")
 		schemaFile = fs.String("schema", "", "JSON Schema for the answer ('-' reads stdin)")
 		jsonOut    = fs.Bool("json", false, "emit raw events on stdout")
@@ -228,6 +236,9 @@ func cmdAsk(args []string) int {
 	}
 	if *continuing && *file != "" {
 		return fail(errors.New("-c and -f cannot be used together"))
+	}
+	if *maxTokens <= 0 {
+		return fail(errors.New("-max-tokens must be greater than zero"))
 	}
 	sysSet, maxTokensSet := false, false
 	fs.Visit(func(f *flag.Flag) {
@@ -264,7 +275,7 @@ func cmdAsk(args []string) int {
 		if log, events, err = event.Open(path); err != nil {
 			return fail(err)
 		}
-		defer log.Close()
+		defer closeLog(log, &code)
 	}
 	if *spec == "" {
 		*spec = headerModel(events)
@@ -274,6 +285,9 @@ func cmdAsk(args []string) int {
 	}
 	if maxTokensSet && strings.HasPrefix(*spec, "openai-codex/") {
 		return fail(errors.New("-max-tokens is not supported by openai-codex"))
+	}
+	if strings.HasPrefix(*spec, "gemini/") && *maxTokens > math.MaxInt32 {
+		return fail(fmt.Errorf("-max-tokens for gemini must not exceed %d", math.MaxInt32))
 	}
 	authorization, err := readAuthorizationFD(*headerFD)
 	if err != nil {
@@ -318,7 +332,7 @@ func cmdAsk(args []string) int {
 		if err != nil {
 			return fail(err)
 		}
-		defer log.Close()
+		defer closeLog(log, &code)
 	}
 	c := &chat.Chat{
 		Provider: prov, Model: model, System: system(*sys, sysSet),
@@ -390,7 +404,13 @@ func cmdAsk(args []string) int {
 			answer = ""
 		}
 	}
-	done(log, err)
+	if logErr := done(log, err); logErr != nil {
+		return fail(logErr)
+	}
+	closeLog(log, &code)
+	if code != 0 {
+		return code
+	}
 	if outputErr == nil && progress != nil && sameOut() {
 		outputErr = progress.err
 	}
@@ -462,16 +482,27 @@ func header(log *event.Log, spec, sys string) error {
 
 // done records how the turn ended, so a log read later says what happened
 // rather than leaving the reader to infer it from what is missing.
-func done(log *event.Log, err error) {
+func done(log *event.Log, err error) error {
+	var d event.DoneData
 	switch {
 	case err == nil:
-		log.Append(event.Done, event.DoneData{Reason: "end"})
+		d = event.DoneData{Reason: "end"}
 	case errors.Is(err, chat.ErrOverflow):
-		log.Append(event.Done, event.DoneData{Reason: "overflow", Error: err.Error()})
+		d = event.DoneData{Reason: "overflow", Error: err.Error()}
 	case errors.Is(err, context.Canceled):
 		// The abort event is already logged, and the session is usable.
+		return nil
 	default:
-		log.Append(event.Done, event.DoneData{Reason: "error", Error: err.Error()})
+		d = event.DoneData{Reason: "error", Error: err.Error()}
+	}
+	_, logErr := log.Append(event.Done, d)
+	return logErr
+}
+
+// Close before admitting normal stdout; defer it too for early returns.
+func closeLog(log *event.Log, code *int) {
+	if err := log.Close(); err != nil {
+		*code = fail(fmt.Errorf("closing session: %w", err))
 	}
 }
 
@@ -590,10 +621,16 @@ func message(text string, data []byte, files []provider.Block, spec string) ([]p
 			if err != nil {
 				return nil, nil, err
 			}
+			if evidence != nil {
+				evidence.Offset += offset
+			}
 		}
 	}
 	if t := compose(text, trimmed); t != "" {
 		blocks = append(blocks, provider.Block{Type: provider.Text, Text: t})
+	}
+	if err := (event.UserData{Blocks: blocks, Evidence: evidence}).CheckEvidence(); err != nil {
+		return nil, nil, err
 	}
 	return blocks, evidence, nil
 }
@@ -653,6 +690,9 @@ func cmdSystem(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return usageCode(fs, err)
 	}
+	if fs.NArg() != 0 {
+		return fail(errors.New("system takes no arguments"))
+	}
 	return printOutput(defaultSystem + "\n")
 }
 
@@ -667,6 +707,9 @@ func cmdReplay(args []string) int {
 	usage(fs, "ask replay [flags] [session]")
 	if err := fs.Parse(args); err != nil {
 		return usageCode(fs, err)
+	}
+	if fs.NArg() > 1 {
+		return fail(errors.New("replay takes at most one session"))
 	}
 	path, err := sessionPath(*dir, fs.Arg(0))
 	if err != nil {

@@ -15,7 +15,7 @@ import (
 	"github.com/patrickyoung/ask/internal/event"
 )
 
-func cmdNote(args []string) int {
+func cmdNote(args []string) (code int) {
 	fs := flag.NewFlagSet("note", flag.ContinueOnError)
 	var (
 		dir      = fs.String("d", askDir(), "conversation directory")
@@ -79,8 +79,8 @@ func cmdNote(args []string) int {
 	path := *file
 	var err error
 	if path == "" {
-		if path, err = sessionPath(*dir, ""); err != nil {
-			return fail(err)
+		if path, err = event.Current(*dir); err != nil {
+			return fail(fmt.Errorf("no current conversation in %s: %w", *dir, err))
 		}
 	}
 	// Everything that can fail has failed by here except the append itself,
@@ -89,7 +89,7 @@ func cmdNote(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	defer log.Close()
+	defer closeLog(log, &code)
 	note := event.NoteData{Source: *source, Text: text, Kind: *kind, Body: body}
 	if structured {
 		if _, err := log.AppendSealed(event.Note, note); err != nil {
@@ -102,6 +102,10 @@ func cmdNote(args []string) int {
 		if err := log.Sync(); err != nil {
 			return fail(err)
 		}
+	}
+	closeLog(log, &code)
+	if code != 0 {
+		return code
 	}
 	if !*quiet {
 		fmt.Fprintf(os.Stderr, "ask: noted %d bytes in %s as %s\n", len(text)+len(body), log.ID(), *source)

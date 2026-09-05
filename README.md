@@ -140,6 +140,7 @@ names the original session and the summarizer session.
 The source snapshot must pass the same verification as `replay -check` before
 the summarizer is called. A failed or incomplete summary leaves its own session
 for inspection, creates no handoff session, and does not move `current`.
+Without a session argument, `compact` requires a valid `current` pointer.
 
 To branch without summarizing, copy the session file and use `-f`:
 
@@ -169,6 +170,9 @@ ask -schema result.schema.json 'Classify this alert.' < alert.txt |
 The schema is sent through each provider's native structured-output field.
 It is not inserted into the system prompt or user message. `ask` then parses
 the completed document and validates it locally.
+Schema numbers retain their exact values on the wire and in local validation,
+including large integers and precise decimals; Ask does not round them through
+floating-point values.
 
 In normal answer mode, invalid JSON, a schema mismatch, a refusal, or an
 incomplete provider stop exits 1 and emits no answer on stdout. The provider
@@ -263,6 +267,8 @@ ask note -s deploy -f run.jsonl 'released as v1.4.2'
 
 The session file must already exist. `-s` is required. Notes are not folded
 into the conversation.
+Without `-f`, `note` follows exactly `current`. A missing or dangling pointer
+is an error; it never guesses another session from file modification times.
 
 Programs can instead append typed JSON evidence and require a durable prefix
 seal. JSON on stdin keeps evidence out of argv:
@@ -392,6 +398,26 @@ The following corrections can affect scripts that relied on earlier behavior:
 - Continuing a multi-block assistant turn through OpenRouter now sends every
   text block in order, separated by blank lines. Earlier versions sent only
   the last block. The stored conversation and its digest do not change.
+- Context input that already contains a stdin envelope now also works with an
+  additional argv instruction. The evidence manifest is checked against the
+  assembled message before it is appended.
+- Schema numbers are now sent exactly, including values beyond `float64`
+  precision and range. Earlier requests could silently round these constraints;
+  their recorded schemas and conversation digests are not rewritten.
+- `note` without `-f` and `compact` without a session argument now require
+  `current`. They no longer fall back to the newest file. Use an explicit
+  session when working with a named thread; read-only `replay` keeps its fallback.
+- `-max-tokens` must be positive; zero is not a provider-default escape.
+  Gemini additionally requires a value no greater than 2147483647, the SDK's
+  integer bound. Individual models may impose smaller limits. `compact` and
+  `replay` reject extra session arguments; `system`, `version`, and `help`
+  reject operands instead of silently ignoring them.
+- Session append, sync, and close failures now cause exit 1. A failed retry
+  record stops further calls, and a failed write prevents further appends until
+  the session is reopened and checked. Normal stdout is withheld if closing
+  the session fails; raw `-json` events may already have been emitted.
+  Summarizer sessions now also record a terminal `done` event for success,
+  overflow, or error (interruption retains `abort`). These records do not fold.
 
 ## Contributing
 

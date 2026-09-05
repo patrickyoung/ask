@@ -152,7 +152,14 @@ func geminiParams(req Request) (*genai.GenerateContentConfig, []*genai.Content, 
 	}
 	if len(req.Schema) > 0 {
 		cfg.ResponseMIMEType = "application/json"
-		cfg.ResponseJsonSchema = schemaObject(req.Schema)
+		// The SDK deep-copies config through float64. Set the native schema
+		// after that conversion, immediately before request serialization.
+		cfg.HTTPOptions = &genai.HTTPOptions{
+			ExtrasRequestProvider: func(body map[string]any) map[string]any {
+				body["generationConfig"].(map[string]any)["responseJsonSchema"] = req.Schema
+				return body
+			},
+		}
 	}
 	var contents []*genai.Content
 	for _, m := range Merge(req.Messages) {

@@ -2,12 +2,14 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"iter"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -347,6 +349,56 @@ func TestForeignAssistantTextSurvivesOnWire(t *testing.T) {
 			first, second := strings.Index(got, "FIRST-BLOCK"), strings.Index(got, "SECOND-BLOCK")
 			if first < 0 || second <= first || strings.Contains(got, "FOREIGN-REASONING") {
 				t.Fatalf("foreign turn lost or reordered text, or leaked reasoning: %s", got)
+			}
+		})
+	}
+}
+
+func TestExactSchemaReachesEveryProvider(t *testing.T) {
+	const schema = `{"type":"object","properties":{"n":{"const":9007199254740993},"negative":{"minimum":-9007199254740993},"decimal":{"multipleOf":0.1234567890123456789012345},"huge":{"enum":[1e400,1e-400]},"literal":{"const":{"$ref":"literal data","number":123456789012345678901234567890}}},"required":["n"],"additionalProperties":false}`
+	decode := func(raw string) any {
+		t.Helper()
+		dec := json.NewDecoder(strings.NewReader(raw))
+		dec.UseNumber()
+		var v any
+		if err := dec.Decode(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	want := decode(schema)
+	paths := map[string][]string{
+		"anthropic":  {"output_config", "format", "schema"},
+		"openai":     {"text", "format", "schema"},
+		"gemini":     {"generationConfig", "responseJsonSchema"},
+		"openrouter": {"response_format", "json_schema", "schema"},
+	}
+	for _, c := range wireCases {
+		if c.name == "replay" {
+			continue
+		}
+		t.Run(c.name, func(t *testing.T) {
+			body := make(chan string, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				body <- string(b)
+				w.Header().Set("Content-Type", "text/event-stream")
+				io.WriteString(w, c.wire)
+			}))
+			defer srv.Close()
+			req := contractReq()
+			req.Schema = json.RawMessage(schema)
+			checkContract(t, c.make(srv.URL).Stream(context.Background(), req))
+			got := decode(<-body)
+			for _, key := range paths[c.name] {
+				object, ok := got.(map[string]any)
+				if !ok {
+					t.Fatalf("schema path missing at %s: %v", key, got)
+				}
+				got = object[key]
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("wire schema changed:\n got: %#v\nwant: %#v", got, want)
 			}
 		})
 	}

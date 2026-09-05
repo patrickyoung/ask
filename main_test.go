@@ -88,7 +88,9 @@ data: {"type":"message_stop"}
 // the assertions below about what was sent rather than how it was spelled.
 func plainJSON(b []byte) string {
 	var v any
-	if err := json.Unmarshal(b, &v); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
 		return string(b)
 	}
 	var out strings.Builder
@@ -324,6 +326,122 @@ func TestContextInsideComposedStdinEnvelopeGetsManifest(t *testing.T) {
 	}
 }
 
+func TestComposedContextWithArgvAndAttachments(t *testing.T) {
+	const snapshot = `{"kind":"context","version":1,"source":"docs","type":"document","id":"1","title":"Doc","ref":"ctx:docs:x","retrieved_at":"2026-08-28T12:00:00Z","content":"evidence","citation":{"locator":"x"}}`
+	input := "Inner instruction π\n\n<stdin>\n" + snapshot + "\n</stdin>\n\nAfterword"
+	for _, attachment := range []bool{false, true} {
+		t.Run(fmt.Sprint(attachment), func(t *testing.T) {
+			dir, _, _ := fake(t, 200, answerWire)
+			args := []string{"-q"}
+			if attachment {
+				path := filepath.Join(t.TempDir(), "context.txt")
+				if err := os.WriteFile(path, []byte("attached text"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				args = append(args, "-a", path)
+			}
+			args = append(args, "Outer instruction λ")
+			code, _, stderr := exec(t, input, args...)
+			if code != 0 {
+				t.Fatalf("exit=%d stderr=%q", code, stderr)
+			}
+			path := filepath.Join(dir, sessions(t, dir)[0])
+			ev := events(t, path)
+			u, err := event.As[event.UserData](ev[1])
+			if err != nil || u.Evidence == nil {
+				t.Fatalf("user=%+v err=%v", u, err)
+			}
+			e := u.Evidence
+			text := u.Content()[e.Block].Text
+			if text[e.Offset:e.Offset+e.SnapshotBytes] != snapshot || strings.Count(text, snapshot) != 1 {
+				t.Fatal("manifest does not point to the one exact snapshot")
+			}
+			if attachment && e.Block != 1 {
+				t.Fatal("manifest points to the attachment instead of the message")
+			}
+			if code, _, stderr := exec(t, "", "-q", "-c", "continue"); code != 0 {
+				t.Fatalf("continuation exit=%d stderr=%q", code, stderr)
+			}
+			if err := event.Check(events(t, path)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestInvalidInvocationDoesNotOpenSession(t *testing.T) {
+	dir, calls, _ := fake(t, 200, answerWire)
+	path := filepath.Join(dir, "existing.jsonl")
+	// An existing torn tail would be repaired by Open. It must stay untouched
+	// when flags or operand counts already make the invocation invalid.
+	const before = "unfinished"
+	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"-max-tokens", "-1", "-f", path, "hello"},
+		{"-max-tokens", "0", "-f", path, "hello"},
+		{"-m", "gemini/test-model", "-max-tokens", "2147483648", "hello"},
+		{"compact", path, "extra"}, {"replay", path, "extra"},
+		{"system", "extra"}, {"version", "extra"}, {"help", "extra"},
+	} {
+		code, out, stderr := exec(t, "", args...)
+		if code != 1 || out != "" || stderr == "" {
+			t.Errorf("%v: exit=%d stdout=%q stderr=%q", args, code, out, stderr)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil || string(after) != before {
+			t.Fatalf("%v touched existing session: %q, %v", args, after, err)
+		}
+	}
+	if calls.Load() != 0 || len(sessions(t, dir)) != 1 {
+		t.Fatal("invalid invocation called a model or created a session")
+	}
+}
+
+func TestPositiveTokenLimitReachesProvider(t *testing.T) {
+	_, _, bodies := fake(t, 200, answerWire)
+	if code, _, stderr := exec(t, "", "-q", "-max-tokens", "1", "hello"); code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	}
+	if !strings.Contains((*bodies)[0], `"max_tokens":1`) {
+		t.Fatal("positive limit changed on wire")
+	}
+}
+
+func TestDoneReportsAppendFailure(t *testing.T) {
+	log, _ := tmpLog(t)
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := done(log, nil); err == nil {
+		t.Fatal("done discarded a failed append")
+	}
+}
+
+func TestCloseLogTurnsSyncFailureIntoExitOne(t *testing.T) {
+	// /dev/null accepts writes but cannot fsync; exercise the real Close path.
+	log, _, err := event.Open(os.DevNull)
+	if err != nil {
+		t.Skipf("cannot use /dev/null as a failing sync fixture: %v", err)
+	}
+	oldErr := os.Stderr
+	errout := tmpFile(t, "stderr")
+	os.Stderr = errout
+	defer func() { os.Stderr = oldErr }()
+	code := 0
+	closeLog(log, &code)
+	if stderr := readAll(t, errout); code != 1 || !strings.Contains(stderr, "closing session") {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	}
+	// This is also the deferred path: a close failure overrides an already
+	// selected outcome, and a repeated cleanup must not overwrite it again.
+	closeLog(log, &code)
+	if code != 1 {
+		t.Fatal("deferred cleanup lost the failure")
+	}
+}
+
 func TestStructuredOutputIsNativeValidatedAndReplayable(t *testing.T) {
 	dir, calls, bodies := fake(t, 200, structuredWire)
 	path := writeSchema(t, numberSchema)
@@ -372,7 +490,7 @@ func TestStructuredOutputIsNativeValidatedAndReplayable(t *testing.T) {
 
 func TestStructuredSchemaNumberStaysNumericOnWireAndExactInReplay(t *testing.T) {
 	dir, _, bodies := fake(t, 200, structuredWire)
-	const exact = "9007199254740991"
+	const exact = "9007199254740993"
 	schema := `{
   "type": "object",
   "properties": {

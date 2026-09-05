@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -64,6 +66,48 @@ func TestNoteAppendsStampedRecord(t *testing.T) {
 	}
 	if got[0].Text != "check passed: go test ./..." {
 		t.Errorf("text = %q", got[0].Text)
+	}
+}
+
+func TestMutatingCommandsRequireCurrent(t *testing.T) {
+	for _, dangling := range []bool{false, true} {
+		t.Run(map[bool]string{false: "missing", true: "dangling"}[dangling], func(t *testing.T) {
+			dir, calls, _ := fake(t, 200, answerWire)
+			path := filepath.Join(dir, "named.jsonl")
+			if code, _, stderr := exec(t, "", "-q", "-f", path, "hello"); code != 0 {
+				t.Fatal(stderr)
+			}
+			if dangling {
+				if err := os.Symlink("missing.jsonl", filepath.Join(dir, "current")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, _ := os.ReadFile(path)
+			for _, args := range [][]string{
+				{"note", "-s", "deploy", "released"},
+				{"note", "-s", "verify", "-k", "result/v1", "-json", `{}`, "-seal"},
+				{"compact"},
+			} {
+				code, out, stderr := exec(t, "", args...)
+				if code != 1 || out != "" || !strings.Contains(stderr, "no current conversation") {
+					t.Fatalf("%v: exit=%d stdout=%q stderr=%q", args, code, out, stderr)
+				}
+			}
+			after, _ := os.ReadFile(path)
+			if string(after) != string(before) || calls.Load() != 1 || len(sessions(t, dir)) != 1 {
+				t.Fatal("default mutation guessed a session")
+			}
+			// Explicit selection remains available even without current.
+			if code, _, stderr := exec(t, "", "note", "-q", "-f", path, "-s", "deploy", "released"); code != 0 {
+				t.Fatal(stderr)
+			}
+			if code, _, stderr := exec(t, "", "compact", "-q", path); code != 0 {
+				t.Fatal(stderr)
+			}
+			if _, err := event.Current(dir); err == nil {
+				t.Fatal("explicit mutation invented current")
+			}
+		})
 	}
 }
 

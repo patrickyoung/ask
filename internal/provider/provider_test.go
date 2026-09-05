@@ -211,8 +211,8 @@ func TestStructuredOutputReachesEveryAdapter(t *testing.T) {
 
 	if cfg, _, err := geminiParams(r); err != nil {
 		t.Fatal(err)
-	} else if s := mustJSON(t, cfg); !strings.Contains(s, `"responseMimeType":"application/json"`) || !strings.Contains(s, `"responseJsonSchema"`) {
-		t.Errorf("gemini did not receive response JSON schema:\n%s", s)
+	} else if cfg.ResponseMIMEType != "application/json" || cfg.HTTPOptions == nil {
+		t.Error("gemini did not configure structured output")
 	}
 
 	var body []byte

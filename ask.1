@@ -80,6 +80,9 @@ refuses it outright, because what cannot be read cannot be proved.
 .B ask compact \fR[\fIflags\fR] [\fIsession\fR]
 Continue a conversation that filled its window, in a fresh one.
 .IP
+With no session argument, current must be available. A missing or dangling
+pointer is an error; the newest file is never substituted.
+.IP
 A session that overflows fails identically forever, which is what exit 2
 means. Continuing requires less context. A model therefore writes a handoff
 note, and
@@ -126,6 +129,10 @@ is fork.
 Record attributed text in a session. The text comes from the arguments, or
 from standard input when there are none. Standard input is limited to 16 MB.
 No model is called, so there is no request event and nothing new to replay.
+.IP
+Without
+.BR \-f ,
+follow exactly current. A missing or dangling pointer is an error.
 .IP
 .B \-s
 is required, is one word, and names the program recording the note.
@@ -241,7 +248,9 @@ omits the reasoning parameter rather than sending an explicit disable value.
 .TP
 .BI \-max\-tokens " n"
 Maximum output tokens for the answer. Default 16384 on adapters that support
-it. An answer cut off at this limit is reported on stderr and exits 1
+it. The value must be positive; zero does not mean the provider default.
+Gemini's SDK accepts at most 2147483647. Models may impose smaller limits.
+An answer cut off at this limit is reported on stderr and exits 1
 with no normal answer on stdout, whether or not
 .B \-schema
 is used. The terminal provider turn remains in the log and conversation;
@@ -348,6 +357,8 @@ stdout still carries the requested raw event stream.
 .PP
 Schemas are at most 1 MB and must be one JSON object. Definitions may use
 fragment references within that object; external references are refused.
+Schema numbers retain their exact values on the wire and during local
+validation, including large integers and precise decimals.
 These checks happen before a new session file is created. Provider support
 is model dependent: an unsupported model returns a provider error rather
 than falling back to prompt instructions. OpenRouter is restricted to
@@ -579,6 +590,24 @@ overflow returns exit 2.
 OpenRouter now receives every text block from a continued assistant turn, in
 order and separated by blank lines. Previously only the last block was sent.
 This corrects wire conversion without changing the log or its digest.
+.PP
+Context input already wrapped in a stdin envelope now composes with argv;
+the manifest is checked against the assembled message before append.
+Schema numbers are no longer rounded through floating point. Earlier logged
+schemas are not rewritten.
+.PP
+Note without a file and compact without a session now require current;
+they no longer fall back to the newest file. Read-only replay keeps its
+fallback. Max-tokens must be positive and fit the provider SDK's integer
+range; zero is not a provider-default escape. Compact and replay reject extra
+session arguments. System, version, and help reject operands.
+.PP
+Append, sync, and close failures return exit 1. Failure to record a retry
+stops further calls; a failed write prevents further appends until the session
+is reopened and checked. Normal stdout is withheld if closing the session
+fails; raw JSON events may already have been emitted. Summarizer sessions now
+also record a terminal done event for success, overflow, or error. These
+records do not change the fold; interruption retains abort.
 .SH EXAMPLES
 Ask a question:
 .PP

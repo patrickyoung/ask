@@ -75,3 +75,25 @@ func TestSchemaDoesNotInterpretLiteralRefKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSchemaValidationKeepsExactNumbers(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"9007199254740993", "9007199254740992"},
+		{"-9007199254740993", "-9007199254740992"},
+		{"0.1234567890123456789012345", "0.1234567890123456789012346"},
+		{"1e400", "2e400"},
+		{"1e-400", "0"},
+	} {
+		number, other := pair[0], pair[1]
+		schema, err := loadSchema(writeSchema(t, `{"const":`+number+`}`))
+		if err != nil {
+			t.Fatalf("compile %s: %v", number, err)
+		}
+		if err := schema.validate(number); err != nil {
+			t.Errorf("exact %s rejected: %v", number, err)
+		}
+		if err := schema.validate(other); err == nil {
+			t.Errorf("const %s admitted %s", number, other)
+		}
+	}
+}

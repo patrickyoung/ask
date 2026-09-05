@@ -8,7 +8,6 @@
 package provider
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,7 +15,6 @@ import (
 	"fmt"
 	"iter"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -64,40 +62,17 @@ type Request struct {
 	Session string `json:"-"`
 }
 
-// schemaObject decodes a schema only at the SDK boundary. Request keeps the
-// raw JSON so logging and replay cannot turn an exact number into a float64.
+// schemaObject supplies the SDK's map shape without decoding its values.
+// RawMessage preserves numeric tokens, including integers beyond float64's
+// precision, and is a JSON marshaler understood by the provider SDKs.
 func schemaObject(raw json.RawMessage) map[string]any {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var object map[string]any
-	_ = dec.Decode(&object) // loadSchema admitted one JSON object
-	return schemaNumbers(object).(map[string]any)
-}
-
-// schemaNumbers keeps JSON numbers numeric at SDK boundaries. encoding/json's
-// json.Number preserves exact source bytes, but the OpenAI SDK treats that
-// string-backed type as a JSON string inside map[string]any. Provider SDKs
-// normalize arbitrary schema maps through their generic JSON representation,
-// so use the concrete numeric type they support. Request keeps the raw schema
-// byte-exact for logging and replay.
-func schemaNumbers(v any) any {
-	switch x := v.(type) {
-	case map[string]any:
-		for key, value := range x {
-			x[key] = schemaNumbers(value)
-		}
-		return x
-	case []any:
-		for i, value := range x {
-			x[i] = schemaNumbers(value)
-		}
-		return x
-	case json.Number:
-		n, _ := strconv.ParseFloat(string(x), 64) // loadSchema admitted a JSON number
-		return n
-	default:
-		return v
+	var object map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &object) // loadSchema admitted one JSON object
+	out := make(map[string]any, len(object))
+	for key, value := range object {
+		out[key] = value
 	}
+	return out
 }
 
 // Logged returns the form of r that enters the session log: the messages
