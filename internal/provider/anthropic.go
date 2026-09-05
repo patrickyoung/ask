@@ -49,8 +49,12 @@ func (p *Anthropic) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, er
 		stream := p.c.Messages.NewStreaming(ctx, params)
 		defer stream.Close()
 		var msg anthropic.Message
+		stopped := false
 		for stream.Next() {
 			ev := stream.Current()
+			if _, ok := ev.AsAny().(anthropic.MessageStopEvent); ok {
+				stopped = true
+			}
 			if err := msg.Accumulate(ev); err != nil {
 				yield(Chunk{}, err)
 				return
@@ -70,6 +74,10 @@ func (p *Anthropic) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, er
 		}
 		if err := stream.Err(); err != nil {
 			yield(Chunk{}, anthropicErr(err))
+			return
+		}
+		if !stopped || msg.StopReason == "" {
+			yield(Chunk{}, errors.New("anthropic: stream ended without a completed message"))
 			return
 		}
 		for _, c := range msg.Content {

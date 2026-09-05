@@ -524,6 +524,7 @@ func TestLoggedReplacesMessagesWithDigest(t *testing.T) {
 // providers return.
 func TestOverflowIsToldFromTransient(t *testing.T) {
 	overflow := []Error{
+		{Status: 400, Code: "context_length_exceeded", Msg: "request rejected"},
 		{Status: 400, Msg: "prompt is too long: 213458 tokens > 200000 maximum"},
 		{Status: 400, Msg: "This model's maximum context length is 128000 tokens, however you requested 131204 tokens"},
 		{Status: 400, Msg: `{"error":{"code":"context_length_exceeded"}}`},
@@ -540,6 +541,12 @@ func TestOverflowIsToldFromTransient(t *testing.T) {
 	}
 
 	transient := []Error{
+		{Status: 400, Msg: "image dimensions exceeds the maximum allowed size"},
+		{Status: 413, Msg: "request size exceeds the maximum of 32 MB"},
+		{Status: 422, Msg: "max_tokens exceeds the maximum number of tokens allowed"},
+		{Status: 400, Msg: "output token limit exceeded"},
+		{Status: 400, Msg: "too many tokens requested for output"},
+		{Status: 400, Msg: "input token count must be positive"},
 		{Status: 429, Msg: "rate limit exceeded"},
 		{Status: 500, Msg: "internal error"},
 		{Status: 529, Msg: "overloaded"},
@@ -551,6 +558,19 @@ func TestOverflowIsToldFromTransient(t *testing.T) {
 		if e.Overflow() {
 			t.Errorf("Overflow() = true for %q", e.Msg)
 		}
+	}
+}
+
+func TestOpenAIOverflowCodeSurvivesNormalization(t *testing.T) {
+	srv := serve(t, 400, nil, `{"error":{"code":"context_length_exceeded","message":"request rejected","type":"invalid_request_error"}}`)
+	p := NewOpenAI("k", srv.URL, nil)
+	var got error
+	for _, err := range p.Stream(context.Background(), contractReq()) {
+		got = err
+	}
+	var pe *Error
+	if !errors.As(got, &pe) || pe.Code != "context_length_exceeded" || !pe.Overflow() {
+		t.Fatalf("normalized error=%v; want context overflow identified by code", got)
 	}
 }
 

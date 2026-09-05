@@ -16,6 +16,7 @@ import (
 // never a second logging pipeline.
 type renderer struct {
 	w      io.Writer
+	err    error
 	color  bool
 	inText bool // mid-stream of assistant text/reasoning deltas
 	usage  provider.Usage
@@ -45,16 +46,22 @@ func (r *renderer) delta(kind provider.ChunkKind, text string) {
 	if kind == provider.KindReasoning {
 		text = r.dim(text)
 	}
-	fmt.Fprint(r.w, text)
+	r.write(text)
 	r.inText = true
+}
+
+func (r *renderer) write(text string) {
+	if r.err == nil {
+		_, r.err = io.WriteString(r.w, text)
+	}
 }
 
 func (r *renderer) line(s string) {
 	if r.inText {
-		fmt.Fprintln(r.w)
+		r.write("\n")
 		r.inText = false
 	}
-	fmt.Fprintln(r.w, s)
+	r.write(s + "\n")
 }
 
 func (r *renderer) event(e event.Event) {
@@ -66,7 +73,7 @@ func (r *renderer) event(e event.Event) {
 		t, _ := event.As[event.Turn](e)
 		r.usage.Add(t.Usage)
 		if r.inText {
-			fmt.Fprintln(r.w)
+			r.write("\n")
 			r.inText = false
 		}
 		if t.Stop == "max_tokens" {

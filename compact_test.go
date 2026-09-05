@@ -197,6 +197,110 @@ func TestCompactRefusesWhatItCannotDo(t *testing.T) {
 	}
 }
 
+func TestCompactVerifiesSourceBeforeCallingProvider(t *testing.T) {
+	for _, damage := range []string{"unsealed", "digest", "sequence", "seal", "evidence"} {
+		t.Run(damage, func(t *testing.T) {
+			dir, calls, _ := fake(t, 200, answerWire)
+			log, err := event.Create(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			header(log, "anthropic/test-model", "")
+			user := event.UserData{Text: "original question"}
+			if damage == "evidence" {
+				user.Evidence = &event.EvidenceData{Block: 0, SnapshotBytes: 1000}
+			}
+			log.Append(event.User, user)
+			switch damage {
+			case "unsealed":
+				log.Append(event.Note, event.NoteData{Source: "ply", Kind: "ply.verifier/v1", Body: []byte(`{"status":"accepted"}`)})
+			case "digest":
+				log.Append(event.Request, provider.Request{Model: "test-model", Digest: "wrong"})
+			case "seal":
+				log.Append(event.Seal, event.SealData{Through: 2, SHA256: "wrong"})
+			}
+			log.Close()
+			before, err := os.ReadFile(log.Path())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if damage == "sequence" {
+				before = []byte(strings.Replace(string(before), `"seq":2`, `"seq":3`, 1))
+				if err := os.WriteFile(log.Path(), before, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			code, out, stderr := exec(t, "", "compact", "-q", log.Path())
+			if code != 1 || out != "" || !strings.Contains(stderr, "verify session before compact") {
+				t.Fatalf("exit=%d stdout=%q stderr=%q", code, out, stderr)
+			}
+			if calls.Load() != 0 || len(sessions(t, dir)) != 1 {
+				t.Fatal("refused compaction called the provider or created a session")
+			}
+			after, _ := os.ReadFile(log.Path())
+			if string(after) != string(before) {
+				t.Fatal("refused compaction modified the source")
+			}
+		})
+	}
+}
+
+func TestCompactRefusesAnIncompleteSummary(t *testing.T) {
+	for _, mode := range []string{"max_tokens", "eof"} {
+		t.Run(mode, func(t *testing.T) {
+			wire := strings.ReplaceAll(answerWire, "end_turn", "max_tokens")
+			if mode == "eof" {
+				wire = strings.Split(answerWire, "event: message_delta")[0]
+			}
+			dir, _, _ := fake(t, 200, wire)
+			log, err := event.Create(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			header(log, "anthropic/test-model", "")
+			log.Append(event.User, event.UserData{Text: "original question"})
+			event.SetCurrent(dir, log)
+			log.Close()
+			code, out, stderr := exec(t, "", "compact", "-q")
+			if code != 1 || out != "" || stderr == "" {
+				t.Fatalf("exit=%d stdout=%q stderr=%q", code, out, stderr)
+			}
+			cur, err := event.Current(dir)
+			if err != nil || cur != log.Path() || len(sessions(t, dir)) != 2 {
+				t.Fatal("incomplete summary created a handoff or moved current")
+			}
+		})
+	}
+}
+
+func TestCompactAcceptsVerifiedStructuredNotes(t *testing.T) {
+	dir, _, bodies := fake(t, 200, answerWire)
+	for _, args := range [][]string{
+		{"-q", "original question"},
+		{"note", "-q", "-s", "ply", "-k", "ply.verifier/v1", "-json", `{"status":"accepted"}`, "-seal"},
+		{"compact", "-q"},
+	} {
+		if code, _, stderr := exec(t, "", args...); code != 0 {
+			t.Fatalf("%v: exit=%d stderr=%s", args, code, stderr)
+		}
+	}
+	if len(sessions(t, dir)) != 3 || len(*bodies) != 2 {
+		t.Fatal("compaction did not create its summarizer and handoff sessions")
+	}
+	if !strings.Contains((*bodies)[1], "ply:ply.verifier/v1") || !strings.Contains((*bodies)[1], "accepted") {
+		t.Fatal("verified note was not included in the summarizer input")
+	}
+	for _, name := range sessions(t, dir) {
+		events, err := event.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := event.Check(events); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // TestTranscriptCarriesWhatTransfers: reasoning is provider-opaque and
 // addressed to a turn that is over, and leaving it out is most of why a
 // transcript fits where the conversation it came from did not.

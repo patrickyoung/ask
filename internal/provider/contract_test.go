@@ -282,6 +282,76 @@ func TestStreamContract(t *testing.T) {
 	}
 }
 
+// A clean HTTP EOF is not evidence that the model finished its turn.
+func TestStreamRequiresCompletion(t *testing.T) {
+	markers := map[string]string{
+		"anthropic":  "event: message_delta",
+		"openai":     "event: response.completed",
+		"gemini":     `data:{"candidates":[{"index":0,"finishReason"`,
+		"openrouter": `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"test-model","choices":[{"index":0,"delta":{"content":" world"}`,
+	}
+	for _, c := range wireCases {
+		marker, ok := markers[c.name]
+		if !ok {
+			continue
+		}
+		t.Run(c.name, func(t *testing.T) {
+			wire, _, found := strings.Cut(c.wire, marker)
+			if !found {
+				t.Fatal("fixture has no completion marker")
+			}
+			srv := serve(t, 200, sseHeader(), wire)
+			var sawText, sawError bool
+			for chunk, err := range c.make(srv.URL).Stream(context.Background(), contractReq()) {
+				if sawError {
+					t.Fatal("yield after stream error")
+				}
+				if err != nil {
+					sawError = true
+					continue
+				}
+				sawText = sawText || chunk.Kind == KindText
+				if chunk.Kind == KindStop {
+					t.Error("unfinished stream yielded a completed turn")
+				}
+			}
+			if !sawText || !sawError {
+				t.Fatalf("text=%v error=%v; want streamed text followed by error", sawText, sawError)
+			}
+		})
+	}
+}
+
+func TestForeignAssistantTextSurvivesOnWire(t *testing.T) {
+	for _, c := range wireCases {
+		if c.name == "replay" {
+			continue
+		}
+		t.Run(c.name, func(t *testing.T) {
+			body := make(chan string, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				body <- string(b)
+				w.Header().Set("Content-Type", "text/event-stream")
+				io.WriteString(w, c.wire)
+			}))
+			defer srv.Close()
+			req := contractReq()
+			req.Messages = append(req.Messages, Message{Role: Assistant, Blocks: []Block{
+				{Type: Text, Text: "FIRST-BLOCK"},
+				{Type: Reasoning, Text: "FOREIGN-REASONING", Provider: "foreign"},
+				{Type: Text, Text: "SECOND-BLOCK"},
+			}}, Message{Role: User, Blocks: []Block{{Type: Text, Text: "continue"}}})
+			checkContract(t, c.make(srv.URL).Stream(context.Background(), req))
+			got := <-body
+			first, second := strings.Index(got, "FIRST-BLOCK"), strings.Index(got, "SECOND-BLOCK")
+			if first < 0 || second <= first || strings.Contains(got, "FOREIGN-REASONING") {
+				t.Fatalf("foreign turn lost or reordered text, or leaked reasoning: %s", got)
+			}
+		})
+	}
+}
+
 // TestReplayableReasoning pins the property the whole log rests on: every
 // adapter that streams reasoning also logs something that can be sent back
 // to it. A signature on a reasoning block or an opaque provider block both

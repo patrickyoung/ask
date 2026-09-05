@@ -75,6 +75,7 @@ func (p *OpenAI) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, error
 				final = &ev.Response
 			case responses.ResponseIncompleteEvent:
 				final = &ev.Response
+				stop = "incomplete"
 			case responses.ResponseOutputItemDoneEvent:
 				if p.codex {
 					seen[ev.Item.ID] = true
@@ -95,7 +96,7 @@ func (p *OpenAI) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, error
 			return
 		}
 		if final == nil {
-			yield(Chunk{}, &Error{Msg: "openai: stream ended without a completed response"})
+			yield(Chunk{}, errors.New("openai: stream ended without a completed response"))
 			return
 		}
 		for _, item := range final.Output {
@@ -288,7 +289,7 @@ func openaiErr(err error) error {
 	}
 	var ae *openai.Error
 	if errors.As(err, &ae) {
-		e := &Error{Status: ae.StatusCode, Msg: ae.Error()}
+		e := &Error{Status: ae.StatusCode, Code: ae.Code, Msg: ae.Error()}
 		if ae.Response != nil {
 			if d, perr := time.ParseDuration(ae.Response.Header.Get("Retry-After") + "s"); perr == nil {
 				e.RetryAfter = d

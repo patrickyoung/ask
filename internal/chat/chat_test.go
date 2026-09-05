@@ -353,6 +353,28 @@ func TestStructuredAnswerRequiresACompleteStop(t *testing.T) {
 	}
 }
 
+func TestMissingStopIsPartial(t *testing.T) {
+	turn := textTurn("unfinished")
+	turn.Stop = ""
+	c, _, log := newChat(t, turn, textTurn("complete"))
+	answer, err := c.Say(context.Background(), say("hi"))
+	if answer != "" || err == nil {
+		t.Fatalf("answer=%q err=%v; want failure", answer, err)
+	}
+	got := events(t, log)
+	partial, err := event.As[event.Turn](got[len(got)-1])
+	if err != nil || !partial.Partial || partial.Blocks[0].Text != "unfinished" {
+		t.Fatalf("partial turn=%+v err=%v", partial, err)
+	}
+	answer, err = c.Say(context.Background(), say("continue"))
+	if err != nil || answer != "complete" {
+		t.Fatalf("continued answer=%q err=%v", answer, err)
+	}
+	if err := event.Check(events(t, log)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestDeltasReachTheDisplay: what streams to the human is what lands in
 // the log, which is the contract every adapter is held to.
 func TestDeltasReachTheDisplay(t *testing.T) {

@@ -77,6 +77,10 @@ func (p *Gemini) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, error
 				usage = resp.UsageMetadata
 			}
 		}
+		if stop == "" {
+			yield(Chunk{}, errors.New("gemini: stream ended without a finish reason"))
+			return
+		}
 		for _, part := range content.Parts {
 			var b Block
 			switch {

@@ -101,6 +101,10 @@ func (p *OpenRouter) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 			return
 		}
 		choice := acc.Choices[0]
+		if choice.FinishReason == "" {
+			yield(Chunk{}, fmt.Errorf("openrouter: stream ended without a finish reason"))
+			return
+		}
 		if r := details.reasoning(); r != "" {
 			if !yield(Chunk{Kind: KindBlock, Block: &Block{Type: Reasoning, Text: r, Provider: "openrouter"}}, nil) {
 				return
@@ -135,7 +139,7 @@ func (p *OpenRouter) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 		}
 		stop := string(choice.FinishReason)
 		switch stop {
-		case "", "stop":
+		case "stop":
 			stop = "end"
 		case "length":
 			stop = "max_tokens"
@@ -193,16 +197,20 @@ func openrouterParams(req Request) (openai.ChatCompletionNewParams, []option.Req
 	for _, m := range req.Messages {
 		if m.Role == Assistant {
 			msg := openai.ChatCompletionAssistantMessageParam{}
+			var texts []string
 			var raw json.RawMessage
 			for _, b := range m.Blocks {
 				switch b.Type {
 				case Text:
-					msg.Content.OfString = openai.String(b.Text)
+					texts = append(texts, b.Text)
 				case Opaque:
 					if b.Provider == "openrouter" {
 						raw = b.Raw
 					}
 				}
+			}
+			if len(texts) > 0 {
+				msg.Content.OfString = openai.String(strings.Join(texts, "\n\n"))
 			}
 			idx := len(params.Messages)
 			params.Messages = append(params.Messages, openai.ChatCompletionMessageParamUnion{OfAssistant: &msg})

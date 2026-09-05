@@ -12,6 +12,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -1008,6 +1009,177 @@ func TestQuietSuppressesProgress(t *testing.T) {
 	}
 }
 
+func TestIncompleteAnswersFailAndRemainReplayable(t *testing.T) {
+	for _, mode := range []string{"eof", "missing-message-stop", "max_tokens", "refusal"} {
+		for _, jsonOut := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%v", mode, jsonOut), func(t *testing.T) {
+				wire := strings.ReplaceAll(answerWire, "end_turn", mode)
+				partial := mode == "eof" || mode == "missing-message-stop"
+				if mode == "eof" {
+					wire = strings.Split(answerWire, "event: message_delta")[0]
+				} else if mode == "missing-message-stop" {
+					wire = strings.Split(answerWire, "event: message_stop")[0]
+				}
+				dir, calls, _ := fake(t, 200, wire)
+				args := []string{"-q"}
+				if jsonOut {
+					args = append(args, "-json")
+				}
+				code, out, stderr := exec(t, "", append(args, "hello")...)
+				if code != 1 || stderr == "" || (!jsonOut && out != "") {
+					t.Fatalf("exit=%d stdout=%q stderr=%q", code, out, stderr)
+				}
+				if calls.Load() != 1 {
+					t.Fatalf("incomplete answer made %d calls", calls.Load())
+				}
+				path := filepath.Join(dir, sessions(t, dir)[0])
+				ev, err := event.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := event.Check(ev); err != nil {
+					t.Fatal(err)
+				}
+				var turn event.Turn
+				for _, e := range ev {
+					if e.Type == event.Assistant {
+						turn, err = event.As[event.Turn](e)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if len(turn.Blocks) == 0 || turn.Partial != partial {
+					t.Fatalf("recorded turn=%+v; want text, partial=%v", turn, partial)
+				}
+				msgs, err := event.Fold(ev)
+				wantMessages := 2
+				if partial {
+					wantMessages = 1
+				}
+				if err != nil || len(msgs) != wantMessages {
+					t.Fatalf("fold=%v err=%v", msgs, err)
+				}
+				if jsonOut {
+					logged, _ := os.ReadFile(path)
+					if out != string(logged) {
+						t.Fatal("JSON stdout differs from the recorded failed turn")
+					}
+				}
+				// A later request must still prove the fold after the failed turn.
+				exec(t, "", "-q", "-f", path, "continue")
+				ev, err = event.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := event.Check(ev); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
+
+func TestNonContextSizeErrorExitsOne(t *testing.T) {
+	fake(t, 400, `{"type":"error","error":{"type":"invalid_request_error","message":"image dimensions exceeds the maximum allowed size"}}`)
+	if code, out, stderr := exec(t, "", "-q", "hello"); code != 1 || out != "" {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, out, stderr)
+	}
+}
+
+// Use a closed file so write failures are exercised on every supported Unix,
+// including systems without /dev/full. The provider turn must remain intact.
+func TestStdoutFailureExitsOne(t *testing.T) {
+	for _, args := range [][]string{
+		{"-q", "hello"}, {"-q", "-json", "hello"},
+		{"replay"}, {"replay", "-json"}, {"replay", "-check"},
+		{"replay", "-check", "-json"}, {"replay", "-step", "3"},
+		{"compact", "-q"}, {"help"}, {"version"}, {"system"}, {"note", "-h"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			dir, _, _ := fake(t, 200, answerWire)
+			if code, _, stderr := exec(t, "", "-q", "initial"); code != 0 {
+				t.Fatalf("setup exit=%d: %s", code, stderr)
+			}
+			in, err := os.Open(os.DevNull)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer in.Close()
+			out, errout := tmpFile(t, "closed"), tmpFile(t, "stderr")
+			out.Close()
+			oldIn, oldOut, oldErr := os.Stdin, os.Stdout, os.Stderr
+			defer func() { os.Stdin, os.Stdout, os.Stderr = oldIn, oldOut, oldErr }()
+			os.Stdin, os.Stdout, os.Stderr = in, out, errout
+			code := run(args)
+			if stderr := readAll(t, errout); code != 1 || !strings.Contains(stderr, "writing stdout") {
+				t.Fatalf("exit=%d stderr=%q", code, stderr)
+			}
+			for _, name := range sessions(t, dir) {
+				ev, err := event.ReadFile(filepath.Join(dir, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := event.Check(ev); err != nil {
+					t.Fatal(err)
+				}
+				if args[0] == "-q" && len(ev) != 5 {
+					t.Fatalf("stdout failure lost the completed turn: %d events", len(ev))
+				}
+			}
+		})
+	}
+}
+
+func TestMergedOutputFailureExitsOne(t *testing.T) {
+	fake(t, 200, answerWire)
+	file := tmpFile(t, "read-only-output")
+	file.Close()
+	out, err := os.Open(file.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	in, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	oldIn, oldOut, oldErr := os.Stdin, os.Stdout, os.Stderr
+	defer func() { os.Stdin, os.Stdout, os.Stderr = oldIn, oldOut, oldErr }()
+	os.Stdin, os.Stdout, os.Stderr = in, out, out
+	if !sameOut() {
+		t.Fatal("fixture must exercise the suppressed stdout echo")
+	}
+	if code := run([]string{"hello"}); code != 1 {
+		t.Fatalf("failed merged output exited %d, want 1", code)
+	}
+}
+
+func TestBrokenPipeKeepsUnixSignal(t *testing.T) {
+	if os.Getenv("ASK_PIPE_CHILD") == "1" {
+		os.Exit(run([]string{"system"}))
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+	defer w.Close()
+	cmd := osexec.Command(os.Args[0], "-test.run=^TestBrokenPipeKeepsUnixSignal$")
+	cmd.Env = append(os.Environ(), "ASK_PIPE_CHILD=1")
+	cmd.Stdout = w
+	err = cmd.Run()
+	var exit *osexec.ExitError
+	if !errors.As(err, &exit) {
+		t.Fatalf("closed pipe error=%v, want SIGPIPE", err)
+	}
+	status, ok := exit.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGPIPE {
+		t.Fatalf("closed pipe status=%v, want SIGPIPE", exit.Sys())
+	}
+}
+
 // TestTypoGuard: a word one edit from a command is a typo, not a paid
 // model call. Anything further away is a message, because asking is the
 // default action and has to stay that way.
@@ -1227,15 +1399,35 @@ func TestDocsCoverEveryFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	man := strings.ReplaceAll(string(raw), `\`, "")
-	for _, f := range []string{
-		"-m", "-S", "-c", "-a", "-f", "-d", "-effort", "-max-tokens",
-		"-header-fd", "-schema", "-json", "-q", "-check", "-step", "-s",
+	flagLine := regexp.MustCompile(`(?m)^  (-[A-Za-z][A-Za-z-]*)(?: |\n)`)
+	for _, c := range []struct{ command, start, end string }{
+		{"", "flags:\n", "compact only:\n"},
+		{"compact", "compact only:\n", "replay only:\n"},
+		{"replay", "replay only:\n", "note only:\n"},
+		{"note", "note only:\n", "keys:"},
 	} {
-		if !strings.Contains(usageText, f+" ") && !strings.Contains(usageText, f+"\n") {
-			t.Errorf("flag %s is missing from ask help", f)
+		args := []string{"-q", "-h"} // bypass run's top-level help
+		if c.command != "" {
+			args = []string{c.command, "-h"}
 		}
-		if !strings.Contains(man, f+" ") && !strings.Contains(man, f+"\n") {
-			t.Errorf("flag %s is missing from ask.1", f)
+		code, help, stderr := exec(t, "", args...)
+		if code != 0 || stderr != "" {
+			t.Fatalf("%s help: exit %d, %s", c.command, code, stderr)
+		}
+		_, section, _ := strings.Cut(usageText, c.start)
+		section, _, _ = strings.Cut(section, c.end)
+		flags := flagLine.FindAllStringSubmatch(help, -1)
+		if len(flags) == 0 {
+			t.Fatalf("%s help contains no flags", c.command)
+		}
+		for _, match := range flags {
+			f := match[1]
+			if !strings.Contains(section, f+" ") && !strings.Contains(section, f+"\n") {
+				t.Errorf("%s flag %s is missing from its ask help section", c.command, f)
+			}
+			if !strings.Contains(man, f+" ") && !strings.Contains(man, f+"\n") {
+				t.Errorf("%s flag %s is missing from ask.1", c.command, f)
+			}
 		}
 	}
 }

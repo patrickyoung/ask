@@ -65,6 +65,9 @@ func cmdCompact(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
+	if err := event.Check(events); err != nil {
+		return fail(fmt.Errorf("verify session before compact: %w", err))
+	}
 	var hdr event.Header
 	if len(events) > 0 && events[0].Type == event.Session {
 		hdr, _ = event.As[event.Header](events[0])
@@ -133,8 +136,7 @@ func cmdCompact(args []string) int {
 		fmt.Fprintf(os.Stderr, "ask: compacted %s → %s (note by %s, %d bytes from %d)\n",
 			idOf(hdr, src), log.ID(), sumID, len(note), len(text))
 	}
-	fmt.Println(log.Path())
-	return 0
+	return printOutput(log.Path() + "\n")
 }
 
 // summarize runs one fresh-context turn over the transcript, in a session

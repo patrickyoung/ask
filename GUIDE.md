@@ -141,45 +141,107 @@ partial message.
 Exit 0 means the model answered. It does not mean the answer was “yes.” Test
 the answer itself.
 
+The examples below are Bash scripts. `set -o pipefail` makes an upstream
+failure count as a pipeline failure; without it, the status comes only from
+the last command. Capture the answer successfully before interpreting it, so
+a failed call cannot be mistaken for “no.”
+
 For prose:
 
-```sh
-if git diff --staged |
-   ask -q 'Does this change authentication? Answer yes or no.' |
-   grep -Eiq '^yes$'; then
-  echo 'security review required'
+```bash
+#!/usr/bin/env bash
+set -o pipefail
+if answer=$(git diff --staged |
+  ask -q 'Does this change authentication? Answer yes or no.'); then
+  case "$answer" in
+    yes) echo 'security review required' ;;
+    no)  echo 'no authentication change reported' ;;
+    *)   echo 'unexpected answer' >&2; exit 1 ;;
+  esac
+else
+  exit "$?"
 fi
 ```
 
 For automation, structured JSON is safer:
 
-```sh
-if ask -q -schema finding.schema.json \
-     'Does this change authentication?' < patch.json |
-   jq -e '.found' >/dev/null; then
-  echo 'security review required'
+```bash
+#!/usr/bin/env bash
+set -o pipefail
+if result=$(ask -q -schema finding.schema.json \
+  'Does this change authentication?' < patch.json); then
+  decision=$(printf '%s\n' "$result" | jq -r '.found') || exit "$?"
+  case "$decision" in
+    true)  echo 'security review required' ;;
+    false) echo 'no authentication change reported' ;;
+    *)     echo 'unexpected decision' >&2; exit 1 ;;
+  esac
+else
+  exit "$?"
 fi
 ```
 
 Model output is untrusted input. Do not pipe it into `sh` or `eval` unless
 you have chosen to execute untrusted text.
 
+## Replace a file only after success
+
+A redirection such as `ask ... > answer.txt` truncates the destination before
+Ask runs. Write a temporary file beside the destination, then rename it only
+after the pipeline succeeds:
+
+```bash
+#!/usr/bin/env bash
+set -o pipefail
+tmp=$(mktemp ./release-note.XXXXXX) || exit 1
+trap 'rm -f -- "$tmp"' EXIT
+if git diff --staged | ask -q 'Write a release note.' > "$tmp"; then
+  mv -- "$tmp" release-note.txt
+else
+  exit "$?"
+fi
+```
+
+The same-directory rename replaces the destination atomically. A failed input
+command, model call, or output write leaves the previous destination intact.
+
 ## Run independent work in parallel
 
 Plain calls create independent sessions, so they can run in parallel. Output
 still needs a key because processes finish out of order.
 
-```sh
-mkdir -p out
+```bash
+#!/usr/bin/env bash
+out=$(mktemp -d ./reviews.XXXXXX) || exit 1
+pids=()
+files=()
 i=0
 for file in *.go; do
+  [ -f "$file" ] || continue
   i=$((i + 1))
-  key=$(printf '%03d' "$i")
-  (ask -q "Review $file in five lines." < "$file" > "out/$key") &
+  key=$(printf '%06d' "$i")
+  files+=("$out/$key")
+  (
+    tmp="$out/$key.tmp"
+    trap 'rm -f -- "$tmp"' EXIT
+    ask -q "Review $file in five lines." < "$file" > "$tmp" || exit "$?"
+    mv -- "$tmp" "$out/$key"
+  ) &
+  pids+=("$!")
 done
-wait
-cat out/*
+status=0
+for pid in "${pids[@]}"; do
+  wait "$pid" || status=$?
+done
+[ "$status" -eq 0 ] || exit "$status"
+if [ "${#files[@]}" -gt 0 ]; then
+  cat -- "${files[@]}"
+fi
 ```
+
+Each job publishes its output only after success. Waiting for each PID exposes
+failed jobs; `wait` without arguments does not report their individual statuses.
+The fresh output directory avoids mixing this run with stale answers.
 
 Each plain call gets its own session. Numbered files restore input order.
 Do not run parallel `-c` calls: only one writer may hold a session.
@@ -193,6 +255,14 @@ causes are recorded in the session. Model streams have no overall deadline;
 use the operating system's `timeout` command, or `gtimeout` from GNU
 coreutils on macOS, when a caller needs one.
 
+An output-token cutoff, missing stream completion, or another non-successful
+stop exits 1 with no normal answer on stdout. The log keeps the terminal turn;
+a failed stream is recorded as partial and is skipped when continuing.
+`-json` still provides the raw events, and `replay` can display the saved text.
+This tightens earlier behavior that could report a truncated answer as success;
+existing logs retain their original folds. Reported stdout write errors also
+exit 1; closed downstream pipes retain Unix SIGPIPE behavior.
+
 Exit 2 has one meaning: a model context window is full. For an ask turn, do
 not retry the same session. Either start over:
 
@@ -203,13 +273,15 @@ ask 'Restate the task with only the needed input.'
 or compact the session:
 
 ```sh
-new=$(ask compact)
+new=$(ask compact) || exit "$?"
 ask -f "$new" 'Continue with the next case.'
 ```
 
 Compaction is explicit because a model decides what the handoff retains. The
 source is unchanged. The summarizer call has its own session, and the new
-session names both its parent and summarizer.
+session names both its parent and summarizer. Compaction verifies the source
+snapshot before calling the model. A rejected source creates no files; a failed
+summary keeps its own log but creates no handoff and does not move `current`.
 
 ## Inspect the record
 

@@ -23,6 +23,13 @@ It is a Unix filter:
 `-q` suppresses progress, not errors. `-json` replaces the normal answer with
 the raw events written by that invocation.
 
+An answer cut off at the output limit, an unfinished stream, or another
+non-successful provider stop exits 1 with no normal answer on stdout.
+Progress may already have appeared on stderr. `-json` still emits the recorded
+events. Reported stdout write errors also exit 1; a closed downstream pipe
+retains Unix SIGPIPE behavior. Output may already be partially written, so
+consumers must check the exit status.
+
 Each plain `ask` starts a fresh conversation. Use `-c` only when the new
 question should include the current conversation.
 
@@ -129,6 +136,10 @@ Compaction creates two new files. One records the summarizer call. The other
 starts a new conversation from the resulting handoff note. The source session
 is not changed. The new message is stamped `source: "summary"`, and its header
 names the original session and the summarizer session.
+
+The source snapshot must pass the same verification as `replay -check` before
+the summarizer is called. A failed or incomplete summary leaves its own session
+for inspection, creates no handoff session, and does not move `current`.
 
 To branch without summarizing, copy the session file and use `-f`:
 
@@ -355,6 +366,32 @@ and [GUIDE.md](GUIDE.md) explains reliable shell patterns.
 configuration file, REPL, daemon, or MCP client. The shell supplies data and
 decides what to do with the answer. Local JSON Schema validation only decides
 whether structured bytes may reach stdout; it does not add another model turn.
+
+## Compatibility of failure handling
+
+The session format, request digests, and folding of existing logs are unchanged;
+no migration is needed. Successful calls retain their output and exit status.
+The following corrections can affect scripts that relied on earlier behavior:
+
+- Plain answers stopped at the output limit previously exited 0; they now
+  exit 1 and withhold normal stdout, as structured answers already did.
+  Other non-successful stops also exit 1. Terminal provider turns remain in
+  the conversation. Inspect them with `ask replay` or request raw events with
+  `-json` when partial output is useful.
+- Streams missing completion previously could appear successful. Newly
+  recorded failed streams are partial assistant turns and are not folded.
+  Existing logged turns are not reclassified, preserving their request digests.
+  Missing-completion responses are not automatically retried; transport and
+  retryable HTTP failures retain their existing retry policy.
+- Failed stdout writes now exit 1 instead of silently reporting success.
+  The provider turn remains recorded; an output failure does not undo it.
+- `compact` now refuses a source that fails replay verification before making
+  a model call or creating files. There is no bypass for unsealed records.
+- Generic size and output-token errors now exit 1, reserving exit 2 for
+  identified context overflow. Ambiguous error messages also remain exit 1.
+- Continuing a multi-block assistant turn through OpenRouter now sends every
+  text block in order, separated by blank lines. Earlier versions sent only
+  the last block. The stored conversation and its digest do not change.
 
 ## Contributing
 

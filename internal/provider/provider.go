@@ -215,6 +215,7 @@ func (u *Usage) Add(v Usage) {
 // Status 0 means a transport-level failure.
 type Error struct {
 	Status     int
+	Code       string // provider's machine-readable error code, when available
 	RetryAfter time.Duration
 	Msg        string
 }
@@ -231,21 +232,16 @@ func (e *Error) Retryable() bool {
 	return e.Status == 0 || e.Status == 408 || e.Status == 429 || e.Status >= 500
 }
 
-// overflowPhrases are how the providers say the conversation no longer
-// fits. There is no status code for it and no machine-readable field, so
-// prose is what there is.
+// overflowPhrases are fallbacks for providers without a specific error code.
+// Each phrase names the input or context: generic size and token limits can
+// describe attachments or output settings, neither of which is exit 2.
 var overflowPhrases = []string{
 	"context length",
 	"context_length",
 	"context window",
 	"prompt is too long",
-	"too many tokens",
 	"maximum context",
-	"maximum number of tokens",
 	"reduce the length of the messages",
-	"input token count",
-	"exceeds the maximum",
-	"token limit",
 }
 
 // Overflow reports whether the call failed because the conversation no
@@ -260,7 +256,13 @@ func (e *Error) Overflow() bool {
 	default:
 		return false
 	}
+	if e.Code == "context_length_exceeded" {
+		return true
+	}
 	msg := strings.ToLower(e.Msg)
+	if strings.Contains(msg, "input token count") && strings.Contains(msg, "exceeds the maximum") {
+		return true
+	}
 	for _, p := range overflowPhrases {
 		if strings.Contains(msg, p) {
 			return true

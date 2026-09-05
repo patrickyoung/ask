@@ -86,16 +86,22 @@ func (c *Chat) Say(ctx context.Context, content []provider.Block) (string, error
 	}
 	turn, err := c.stream(ctx, req)
 	if err != nil {
+		// Failed streams remain inspectable but never become model context.
+		if len(turn.Blocks) > 0 {
+			turn.Partial = true
+			if _, logErr := c.append(event.Assistant, turn); logErr != nil {
+				return "", errors.Join(err, logErr)
+			}
+			if logErr := c.Log.Sync(); logErr != nil {
+				return "", errors.Join(err, logErr)
+			}
+		}
 		if ctx.Err() != nil {
 			// Mark the abort even when nothing streamed, so an interrupted
 			// session is distinguishable from a crash. A partial turn is
 			// logged as partial: Fold skips it, so continuing this session
 			// asks the same question again rather than pretending half an
 			// answer was the answer.
-			if len(turn.Blocks) > 0 {
-				turn.Partial = true
-				c.append(event.Assistant, turn)
-			}
 			c.append(event.Abort, struct{}{})
 			c.Log.Sync()
 			return "", ctx.Err()
@@ -117,6 +123,12 @@ func (c *Chat) Say(ctx context.Context, content []provider.Block) (string, error
 			return "", fmt.Errorf("structured output stopped with %q", turn.Stop)
 		}
 		return structuredAnswer(turn.Blocks), nil
+	}
+	if turn.Stop == "max_tokens" {
+		return "", errors.New("answer was cut off at the output limit (raise -max-tokens)")
+	}
+	if turn.Stop != "end" {
+		return "", fmt.Errorf("answer stopped with %q", turn.Stop)
 	}
 	return answer(turn.Blocks), nil
 }
@@ -214,6 +226,9 @@ func (c *Chat) once(ctx context.Context, req provider.Request) (event.Turn, erro
 	}
 	if err := ctx.Err(); err != nil {
 		return partial(), err
+	}
+	if turn.Stop == "" {
+		return partial(), errors.New("stream ended without a stop reason")
 	}
 	turn.MS = time.Since(start).Milliseconds()
 	return turn, nil

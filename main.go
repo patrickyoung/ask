@@ -45,6 +45,8 @@ Anything that is not a command is a message; -- forces a command-like word.
 streams: the answer is stdout. Progress and errors are stderr. Piped stdin
 is the message, or data for an instruction:
   git diff | ask "write a commit message"
+An unfinished or output-limited answer exits 1 with no normal stdout.
+-json still emits its recorded events; replay can display the saved text.
 
 conversation: each ask starts a fresh session. -c continues the current one;
 -f keeps a named thread in a file of your own.
@@ -96,6 +98,9 @@ note only:
   -f file       session to append to (default: current)
   -d dir        conversation directory ($ASK_DIR)
   -q            no progress on stderr; errors still print
+  -k kind       structured record kind; requires -json and -seal
+  -json body    note JSON ("-" reads stdin); requires -k and -seal
+  -seal         durably seal the structured note; requires -k and -json
 keys: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY
 env: ASK_MODEL (-m) · ASK_SYSTEM (-S) · ASK_DIR (-d) · NO_COLOR
 gateway: ANTHROPIC_BASE_URL · OPENAI_BASE_URL · OPENAI_CODEX_BASE_URL ·
@@ -123,11 +128,9 @@ func run(args []string) int {
 		case "note":
 			return cmdNote(args[1:])
 		case "version", "-V", "--version":
-			fmt.Printf("ask %s\n", version)
-			return 0
+			return printOutput("ask " + version + "\n")
 		case "help", "-h", "--help":
-			fmt.Print(usageText)
-			return 0
+			return printOutput(usageText)
 		}
 		if slices.Contains(retiredVerbs, args[0]) {
 			fmt.Fprintf(os.Stderr, "ask: %s was removed; OAuth credentials belong to the oauth filter\n", args[0])
@@ -327,8 +330,11 @@ func cmdAsk(args []string) int {
 	// Two views over one event stream: progress on stderr for a human,
 	// raw JSONL on stdout for a program. Neither is a second log.
 	var views []func(event.Event)
+	var outputErr error
+	var progress *renderer
 	if !*quiet {
 		r := newRenderer(os.Stderr)
+		progress = r
 		c.OnDelta = r.delta
 		views = append(views, r.event)
 		if n := c.Turns(); n > 0 {
@@ -337,7 +343,12 @@ func cmdAsk(args []string) int {
 		}
 	}
 	if *jsonOut {
-		views = append(views, jsonEvents(os.Stdout))
+		emit := jsonEvents(os.Stdout)
+		views = append(views, func(e event.Event) {
+			if outputErr == nil {
+				outputErr = emit(e)
+			}
+		})
 	}
 	log.Observe(func(e event.Event) {
 		for _, view := range views {
@@ -380,6 +391,12 @@ func cmdAsk(args []string) int {
 		}
 	}
 	done(log, err)
+	if outputErr == nil && progress != nil && sameOut() {
+		outputErr = progress.err
+	}
+	if outputErr != nil {
+		return fail(fmt.Errorf("writing stdout: %w", outputErr))
+	}
 	return finish(*jsonOut, !*quiet, answer, err)
 }
 
@@ -466,7 +483,9 @@ func done(log *event.Log, err error) {
 // whatever the streams are pointed at.
 func finish(jsonOut, streamed bool, answer string, err error) int {
 	if answer != "" && !jsonOut && !(streamed && sameOut()) {
-		fmt.Println(answer)
+		if code := printOutput(answer + "\n"); code != 0 {
+			return code
+		}
 	}
 	switch {
 	case err == nil:
@@ -481,6 +500,13 @@ func finish(jsonOut, streamed bool, answer string, err error) int {
 		fmt.Fprintln(os.Stderr, "ask:", err)
 		return 1
 	}
+}
+
+func printOutput(text string) int {
+	if _, err := io.WriteString(os.Stdout, text); err != nil {
+		return fail(fmt.Errorf("writing stdout: %w", err))
+	}
+	return 0
 }
 
 // sameOut reports whether stdout and stderr land in the same place — the
@@ -627,8 +653,7 @@ func cmdSystem(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return usageCode(fs, err)
 	}
-	fmt.Println(defaultSystem)
-	return 0
+	return printOutput(defaultSystem + "\n")
 }
 
 func cmdReplay(args []string) int {
@@ -668,10 +693,12 @@ func cmdReplay(args []string) int {
 		if *jsonOut {
 			emit := jsonEvents(os.Stdout)
 			for _, e := range events {
-				emit(e)
+				if err := emit(e); err != nil {
+					return fail(fmt.Errorf("writing stdout: %w", err))
+				}
 			}
 		} else {
-			fmt.Printf("ok: %s replays exactly; sealed records verify (%d events)\n", filepath.Base(path), len(events))
+			return printOutput(fmt.Sprintf("ok: %s replays exactly; sealed records verify (%d events)\n", filepath.Base(path), len(events)))
 		}
 	case *step > 0:
 		for i, e := range events {
@@ -695,14 +722,15 @@ func cmdReplay(args []string) int {
 			if err != nil {
 				return fail(err)
 			}
-			fmt.Println(string(out))
-			return 0
+			return printOutput(string(out) + "\n")
 		}
 		return fail(fmt.Errorf("no request event at seq %d", *step))
 	case *jsonOut:
 		emit := jsonEvents(os.Stdout)
 		for _, e := range events {
-			emit(e)
+			if err := emit(e); err != nil {
+				return fail(fmt.Errorf("writing stdout: %w", err))
+			}
 		}
 	default:
 		r := newRenderer(os.Stdout)
@@ -710,7 +738,7 @@ func cmdReplay(args []string) int {
 			switch e.Type {
 			case event.Session:
 				h, _ := event.As[event.Header](e)
-				fmt.Printf("session %s · %s · %s\n", h.ID, h.Model, e.Time.Local().Format("2006-01-02 15:04"))
+				r.line(fmt.Sprintf("session %s · %s · %s", h.ID, h.Model, e.Time.Local().Format("2006-01-02 15:04")))
 				continue
 			case event.Assistant:
 				t, _ := event.As[event.Turn](e)
@@ -724,6 +752,9 @@ func cmdReplay(args []string) int {
 				}
 			}
 			r.event(e)
+		}
+		if r.err != nil {
+			return fail(fmt.Errorf("writing stdout: %w", r.err))
 		}
 	}
 	if rerr != nil {
@@ -753,9 +784,9 @@ func sessionPath(dir, arg string) (string, error) {
 }
 
 // jsonEvents renders events as raw JSONL — the machine view.
-func jsonEvents(w io.Writer) func(event.Event) {
+func jsonEvents(w io.Writer) func(event.Event) error {
 	enc := json.NewEncoder(w)
-	return func(e event.Event) { enc.Encode(e) }
+	return func(e event.Event) error { return enc.Encode(e) }
 }
 
 // usage gives a flag set a synopsis line above its flag defaults, and takes
@@ -778,9 +809,10 @@ func usage(fs *flag.FlagSet, synopsis string) {
 // window, never to typos.
 func usageCode(fs *flag.FlagSet, err error) int {
 	if errors.Is(err, flag.ErrHelp) {
-		fs.SetOutput(os.Stdout)
+		var out strings.Builder
+		fs.SetOutput(&out)
 		fs.Usage()
-		return 0
+		return printOutput(out.String())
 	}
 	fs.SetOutput(os.Stderr)
 	fmt.Fprintln(os.Stderr, "ask:", err)

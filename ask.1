@@ -96,6 +96,10 @@ and its
 .B summary
 session named in the header. Each of the three replays alone.
 .IP
+The source snapshot must pass replay verification before a model call or any
+new file is created. An incomplete or failed summary leaves its own session
+for inspection, creates no handoff session, and does not move current.
+.IP
 The new session lands beside the source.
 .B current
 moves only if the source was the current session: compacting the
@@ -237,11 +241,12 @@ omits the reasoning parameter rather than sending an explicit disable value.
 .TP
 .BI \-max\-tokens " n"
 Maximum output tokens for the answer. Default 16384 on adapters that support
-it. An answer cut off at this limit is reported on stderr and still exits 0
-\(em it is output, just
-incomplete. With
-.BR \-schema ,
-a cut off document exits 1 and stdout stays empty.
+it. An answer cut off at this limit is reported on stderr and exits 1
+with no normal answer on stdout, whether or not
+.B \-schema
+is used. The terminal provider turn remains in the log and conversation;
+.B \-json
+still emits its raw events.
 .B openai\-codex
 does not support this option; explicitly setting it is an error, and when it
 is omitted no output limit is sent.
@@ -531,8 +536,10 @@ The command completed successfully. For an ask turn, the model answered.
 .TP
 .B 1
 An error: bad usage, a missing key, a provider failure, a corrupt log, or
-a turn that produced no text. Structured output also uses exit 1 for invalid
-JSON, a schema mismatch, a refusal, or an incomplete stop.
+a turn that produced no text. Unfinished streams, output-limit stops, other
+non-successful stops, and reported stdout write failures also exit 1.
+Structured output additionally uses exit 1 for invalid JSON or a schema
+mismatch. A closed downstream pipe retains normal Unix SIGPIPE behavior.
 .TP
 .B 2
 The context window is full. This is permanent for that conversation \(em
@@ -549,6 +556,29 @@ excluded from context. An
 .B abort
 event records the interruption, so the session can be continued and the
 question asked again.
+.SH COMPATIBILITY
+The session format and the fold of existing logs are unchanged; no migration
+is required. Successful calls keep their output and exit status.
+.PP
+Earlier versions could return exit 0 and normal stdout for an unfinished or
+output-limited answer. New calls return exit 1 and withhold normal stdout for
+these and other non-successful stops. Terminal provider turns remain in the
+conversation; newly recorded failed streams are partial and excluded from it.
+Existing turns are not reclassified, preserving every recorded request digest.
+Missing-completion responses are not automatically retried; transport and
+retryable HTTP failures retain their existing retry policy.
+Use replay to inspect rejected output, or request raw events with
+.BR \-json .
+.PP
+Reported stdout write errors now return exit 1; a recorded turn is not undone
+by a delivery failure. Some bytes may already have been written.
+Compaction now verifies its source before creating files or calling a model.
+Generic size and output-token errors return exit 1; only identified context
+overflow returns exit 2.
+.PP
+OpenRouter now receives every text block from a continued assistant turn, in
+order and separated by blank lines. Previously only the last block was sent.
+This corrects wire conversion without changing the log or its digest.
 .SH EXAMPLES
 Ask a question:
 .PP
